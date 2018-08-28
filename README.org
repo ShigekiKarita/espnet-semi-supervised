@@ -1,0 +1,74 @@
+* ESPnet extensions for semi-supervised end-to-end speech recognition
+
+This repository contains evaluation scripts used in our paper
+#+begin_quote
+Shigeki Karita, Shinji Watanabe, Tomoharu Iwata, Atsunori Ogawa, Marc Delcroix, "Semi-Supervised End-to-End Speech Recognition," INTERSPEECH, 2018
+#+end_quote
+A PDF file will be available in [[https://www.isca-speech.org/iscaweb/index.php/archive/online-archive][ISCA Online Archive]].
+
+** how to setup
+
+#+begin_src bash
+$ git clone https://github.com/nttcslab-sp/espnet-semisupervised --recursive
+$ cd espnet-semisupervised/espnet/tools; make PYTHON_VERSION=3 -f conda.mk
+$ cd ../..
+$ ./run.sh --gpu 0 --wsj0 <your-wsj0-path> --wsj1 <your-wsj1-path>
+#+end_src
+
+NOTE: you need to install pytorch 0.3.1.
+
+** scripts
+
+in root dir
+
+- run.sh : end-to-end recipe for this experiment (do not forget to set --gpu 0 if you have that)
+- sbatch.sh : slurm job script for sevaral pair/unpair data ratio and hyper parameter search (requires finished run_retrain_wsj.sh expdir for pretrained model params)
+
+in ~shell/~ dir
+
+- show_results.sh : summarize CER/WER/SER from decoded results of dev93/test92 sets  (usage: `show_results.sh exp/train_si84_xxx`)
+- decode.sh : a script for decode and evaluate training model (usage: `decode.sh --expdir exp/train_si84_xxx`)
+- debug.sh : we recommend to ~source debug.sh~ before using ipython to set path to everything you need
+
+in ~python/~ dir
+
+- asr_train_loop_th.py : is a python script for initial-training with the paired dataset (train_si84)
+- retrain_loop_th.py : is a python script for re-training with the unpaired dataset (train_si284)
+- unsupervised_recog_th.py : is a python script for decoding by the re-trained model
+- unsupervised.py : implements pytorch model for paired/unpaired learning
+- results.py : implements chainer like reporter without chainer iterator used in training loop
+
+** results
+
+| train_set                                  | dev93 Acc | dev93 CER | eval92 CER | dev93 WER | eval92 WER | dev93 SER | eval92 SER | path                                                                                                                                                         |
+|--------------------------------------------+-----------+-----------+------------+-----------+------------+-----------+------------+--------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| train_si84 (7138, 15 hours)                |      77.6 |      25.4 |       15.8 |      61.9 |       44.2 |      99.8 |       98.5 | exp/train_si84_blstmp_e6_subsample1_2_2_1_1_unit320_proj320_d1_unit300_location_aconvc10_aconvf100_mtlalpha0.5_adadelta_bs30_mli800_mlo150                   |
+| + train_si284 RNNLM                        |           |      19.3 |       16.6 |      51.3 |       47.7 |      99.8 |       99.7 | exp/rnnlm_train_si84_blstmp_e6_subsample1_2_2_1_1_unit320_proj320_d1_unit300_location_aconvc10_aconvf100_mtlalpha0.5_adadelta_bs30_mli800_mlo150_epochs15    |
+|--------------------------------------------+-----------+-----------+------------+-----------+------------+-----------+------------+--------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| + unpaired train_si284 retrain             |      83.8 |      28.2 |       15.6 |      61.2 |       40.5 |      99.6 |       97.6 | ./exp/train_si84_retrain_None_alpha0.5_adadelta_lr1.0_bs30_el6_dl1_att_location_batch30_data_loss0.9                                                         |
+| + RNNLM                                    |           |      22.1 |       17.2 |      51.6 |       44.2 |      99.0 |       99.4 | ./exp/train_si84_retrain_None_alpha0.5_adadelta_lr1.0_bs30_el6_dl1_att_location_batch30_data_loss0.9/rnnlm0.1                                                |
+| + unpaired train_si284 retrain w/ GAN-si84 |      83.5 |      26.3 |       15.0 |      59.9 |       40.0 |      99.4 |       97.3 | exp/train_si84_paired_hidden_gan_alpha0.5_bnFalse_adadelta_lr1.0_bs30_el6_dl1_att_location_batch30_data_loss0.9_st0.5_train_si84_epochs15                    |
+| + unpaired train_si284 retrain w/ KL-si84  |      83.6 |      28.5 |       15.6 |      60.5 |       40.4 |      99.6 |       97.3 | exp/train_si84_paired_hidden_gausslogdet_alpha0.5_bnFalse_adadelta_lr1.0_bs30_el6_dl1_att_location_batch30_data_loss0.9_st0.9_train_si84_epochs15            |
+| + unpaired train_si284 retrain w/ GAN      |      84.2 |      22.1 |       17.9 |      50.9 |       44.2 |      99.2 |       99.4 | ./exp/train_si84_retrain84_gan_alpha0.5_adadelta_lr1.0_bs30_el6_dl1_att_location_batch30_data_loss0.9_st0.9_train_si84_iter5                                 |
+| + RNNLM                                    |           |      22.1 |       17.9 |      50.9 |       44.2 |      99.2 |       99.4 | ./exp/train_si84_retrain84_gan_alpha0.5_adadelta_lr1.0_bs30_el6_dl1_att_location_batch30_data_loss0.9_st0.9_train_si84_iter5/rnnlm0.2                        |
+| + unpaired train_si284 retrain w/ KL       |      84.0 |      24.8 |       14.4 |      58.1 |       39.5 |      99.6 |       96.4 | ./exp/train_si84_ret3_gausslogdet_alpha0.5_bnFalse_adadelta_lr1.0_bs30_el6_dl1_att_location_batch30_data_loss0.9_st0.5_train_si84_epochs30                   |
+| + RNNLM                                    |           |      20.0 |       16.9 |      48.9 |       42.7 |      99.0 |       99.1 | ./exp/train_si84_retrain84_gausslogdet_alpha0.5_adadelta_lr1.0_bs30_el6_dl1_att_location_batch30_data_loss0.99_st0.99_train_si84/rnnlm0.2                    |
+| + unpaired train_si284 retrain w/ MMD      |      82.9 |      25.9 |       13.9 |      59.7 |       38.4 |      99.2 |       96.7 | ./exp/train_si84_ret3_mmd_alpha0.5_bnFalse_adadelta_lr1.0_bs30_el6_dl1_att_location_batch30_data_loss0.5_st0.99_train_si84_epochs30                          |
+|--------------------------------------------+-----------+-----------+------------+-----------+------------+-----------+------------+--------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| train_si284 (37416 utt, 81 hours)          |      93.9 |       8.1 |        6.3 |      23.8 |       18.9 |      92.4 |       87.4 | exp/train_si284_blstmp_e6_subsample1_2_2_1_1_unit320_proj320_d1_unit300_location_aconvc10_aconvf100_mtlalpha0.5_adadelta_bs30_mli800_mlo150                  |
+| + train_si284 RNNLM                        |           |       7.9 |        6.1 |      22.7 |       18.3 |      89.7 |       84.1 | ./exp/rnnlm_train_si284_blstmp_e6_subsample1_2_2_1_1_unit320_proj320_d1_unit300_location_aconvc10_aconvf100_mtlalpha0.5_adadelta_bs30_mli800_mlo150_epochs15 |
+
+
+- Acc: character accuracy during training with forced decoding
+- CER: character error rate (edit distance based error)
+- WER: word error rate (edit distance based error)
+- SER: sentence error rate (exact match error)
+- all the exp path starts with ~exp/...~ is placed to ~/nfs/kswork/kishin/karita/experiments/espnet-unspervised/egs/wsj/unsupervised~ on NTT ks-servers
+
+smaller paired train data results
+
+[[plot.png]]
+
+** contact
+
+email: karita.shigeki@lab.ntt.co.jp

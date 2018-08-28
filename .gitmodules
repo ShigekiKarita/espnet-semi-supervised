@@ -1,0 +1,3 @@
+[submodule "espnet"]
+	path = espnet
+	url = https://github.com/espnet/espnet
