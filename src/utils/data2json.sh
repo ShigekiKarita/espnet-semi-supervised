@@ -11,6 +11,7 @@ feat="" # feat.scp
 oov="<unk>"
 bpecode=""
 verbose=0
+scps=""
 
 . utils/parse_options.sh
 
@@ -27,13 +28,11 @@ rm -f ${tmpdir}/*.scp
 # input, which is not necessary for decoding mode, and make it as an option
 if [ ! -z ${feat} ]; then
     if [ ${verbose} -eq 0 ]; then
-        utils/data/get_utt2num_frames.sh ${dir} &> /dev/null
-        cp ${dir}/utt2num_frames ${tmpdir}/ilen.scp
+        feat-to-len scp:${feat} ark,t:${tmpdir}/ilen.scp &> /dev/null
         feat-to-dim scp:${feat} ark,t:${tmpdir}/idim.scp &> /dev/null
     else
-        utils/data/get_utt2num_frames.sh ${dir}
-        cp ${dir}/utt2num_frames ${tmpdir}/ilen.scp
-        feat-to-dim scp:${feat} ark,t:${tmpdir}/idim.scp
+        feat-to-len scp:${feat} ark,t:${tmpdir}/ilen.scp 
+        feat-to-dim scp:${feat} ark,t:${tmpdir}/idim.scp 
     fi
 fi
 
@@ -57,10 +56,12 @@ if [ ! -z ${lang} ]; then
     awk -v lang=${lang} '{print $1 " " lang}' ${dir}/text > ${tmpdir}/lang.scp
 fi
 # feats
-cat ${feat} > ${tmpdir}/feat.scp
+if [ ! -z ${feat} ]; then
+    cat ${feat} > ${tmpdir}/feat.scp
+fi
 
 rm -f ${tmpdir}/*.json
-for x in ${dir}/text ${dir}/utt2spk ${tmpdir}/*.scp; do
+for x in ${dir}/text ${dir}/utt2spk ${tmpdir}/*.scp ${scps}; do
     k=`basename ${x} .scp`
     cat ${x} | scp2json.py --key ${k} > ${tmpdir}/${k}.json
 done
