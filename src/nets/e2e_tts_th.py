@@ -19,6 +19,35 @@ from torch.nn.utils.rnn import pad_packed_sequence
 from e2e_asr_th import AttLoc
 from e2e_asr_th import to_cuda
 
+import math
+
+
+TWO_PI_SQRT = math.sqrt(2 * math.pi)
+
+
+def gaussian(x, mean=0, cov=1):
+    xm = x - mean
+    return torch.exp(-xm * xm / (2 * cov * cov)) / (TWO_PI_SQRT * cov)
+
+
+def monotonic_filter(n_input, n_output, cov=1):
+    xs = torch.arange(0, n_input, dtype=torch.float32)
+    ms = torch.arange(0, n_output, dtype=torch.float32) / n_output * n_input
+    ys = gaussian(xs.unsqueeze(1), ms.unsqueeze(0))
+    return ys
+
+
+def monotonic_loss_fun(attn, in_margin=0.2, cov=1):
+    # TODO select auto margin like auto insertion rate in decoding
+    nin = int((1 - in_margin) * attn.size(0))
+    nout = attn.size(1)
+    with torch.no_grad():
+        g = monotonic_filter(nin, nout, cov=cov) # (nin, nout)
+        g = g.to(attn.device)
+    return -torch.nn.functional.conv2d(
+        attn.unsqueeze(0).unsqueeze(1),
+        g.unsqueeze(0).unsqueeze(1)).mean()
+
 
 def encoder_init(m):
     if isinstance(m, torch.nn.Conv1d):
@@ -54,11 +83,12 @@ def make_mask(lengths, dim=None):
 
 
 class Reporter(chainer.Chain):
-    def report(self, l1_loss, mse_loss, bce_loss, loss):
+    def report(self, l1_loss, mse_loss, bce_loss, loss, monotonic_loss):
         chainer.reporter.report({'l1_loss': l1_loss}, self)
         chainer.reporter.report({'mse_loss': mse_loss}, self)
         chainer.reporter.report({'bce_loss': bce_loss}, self)
         chainer.reporter.report({'loss': loss}, self)
+        chainer.reporter.report({'monotonic_loss': monotonic_loss}, self)
 
 
 class ZoneOutCell(torch.nn.Module):
@@ -106,11 +136,12 @@ class Tacotron2Loss(torch.nn.Module):
     :param float bce_pos_weight: weight of positive sample of stop token (only for use_masking=True)
     """
 
-    def __init__(self, model, use_masking=True, bce_pos_weight=20.0):
+    def __init__(self, model, use_masking=True, bce_pos_weight=20.0, monotonic=0.0):
         super(Tacotron2Loss, self).__init__()
         self.model = model
         self.use_masking = use_masking
         self.bce_pos_weight = bce_pos_weight
+        self.monotonic = monotonic
         self.reporter = Reporter()
 
     def forward(self, xs, ilens, ys, labels, olens=None, spembs=None):
@@ -125,8 +156,14 @@ class Tacotron2Loss(torch.nn.Module):
         :return: loss value
         :rtype: torch.Tensor
         """
-        after_outs, before_outs, logits = self.model(xs, ilens, ys, spembs)
+        after_outs, before_outs, logits, att_ws = self.model(xs, ilens, ys, spembs)
         if self.use_masking and olens is not None:
+            # monotonic loss
+            monotonic_loss = 0.0
+            if self.monotonic != 0.0:
+                att_ws = torch.stack(att_ws).permute(1, 2, 0)  # (B, nin, nout)
+                for i, att in enumerate(att_ws):
+                    monotonic_loss += monotonic_loss_fun(att[:ilens[i], :olens[i]])
             # weight positive samples
             if self.bce_pos_weight != 1.0:
                 weights = ys.new(*labels.size()).fill_(1)
@@ -145,18 +182,20 @@ class Tacotron2Loss(torch.nn.Module):
             l1_loss = F.l1_loss(after_outs, ys) + F.l1_loss(before_outs, ys)
             mse_loss = F.mse_loss(after_outs, ys) + F.mse_loss(before_outs, ys)
             bce_loss = F.binary_cross_entropy_with_logits(logits, labels, weights)
-            loss = l1_loss + mse_loss + bce_loss
+            loss = l1_loss + mse_loss + bce_loss + self.monotonic * monotonic_loss
         else:
             # calculate loss
             l1_loss = F.l1_loss(after_outs, ys) + F.l1_loss(before_outs, ys)
             mse_loss = F.mse_loss(after_outs, ys) + F.mse_loss(before_outs, ys)
             bce_loss = F.binary_cross_entropy_with_logits(logits, labels)
             loss = l1_loss + mse_loss + bce_loss
+            monotonic_loss = 0.0
 
         # report loss values for logging
         logging.debug("loss = %.3e (bce: %.3e, l1: %.3e, mse: %.3e)" % (
             loss.item(), bce_loss.item(), l1_loss.item(), mse_loss.item()))
-        self.reporter.report(l1_loss.item(), mse_loss.item(), bce_loss.item(), loss.item())
+        self.reporter.report(l1_loss.item(), mse_loss.item(), bce_loss.item(), loss.item(),
+                             float(monotonic_loss))
 
         return loss
 
@@ -219,6 +258,7 @@ class Tacotron2(torch.nn.Module):
         self.use_concate = args.use_concate
         self.dropout = args.dropout
         self.zoneout = args.zoneout
+        self.monotonic = args.monotonic
         # define activation function for the final output
         if args.output_activation is None:
             self.output_activation_fn = None
@@ -257,7 +297,8 @@ class Tacotron2(torch.nn.Module):
                            use_batch_norm=self.use_batch_norm,
                            use_concate=self.use_concate,
                            dropout=self.dropout,
-                           zoneout=self.zoneout)
+                           zoneout=self.zoneout,
+                           monotonic=self.monotonic)
         # initialize
         self.enc.apply(encoder_init)
         self.dec.apply(decoder_init)
@@ -275,8 +316,8 @@ class Tacotron2(torch.nn.Module):
         :rtype: torch.Tensor
         :return: stop logits (B, Lmax)
         :rtype: torch.Tensor
-        :return: attetion weights (B, Lmax, Tmax)
-        :rtype: torch.Tensor
+        :return: attetion weights Lmax x (B, Tmax)
+        :rtype: list of torch.Tensor
         """
         # check ilens type (should be list of int)
         if isinstance(ilens, torch.Tensor) or isinstance(ilens, np.ndarray):
@@ -286,9 +327,7 @@ class Tacotron2(torch.nn.Module):
         if self.spk_embed_dim is not None:
             spembs = F.normalize(spembs).unsqueeze(1).expand(-1, hs.size(1), -1)
             hs = torch.cat([hs, spembs], dim=-1)
-        after_outs, before_outs, logits = self.dec(hs, hlens, ys)
-
-        return after_outs, before_outs, logits
+        return self.dec(hs, hlens, ys)
 
     def inference(self, x, inference_args, spemb=None):
         """GENERATE THE SEQUENCE OF FEATURES FROM THE SEQUENCE OF CHARACTERS
@@ -496,7 +535,8 @@ class Decoder(torch.nn.Module):
                  zoneout=0.1,
                  threshold=0.5,
                  maxlenratio=5.0,
-                 minlenratio=0.0):
+                 minlenratio=0.0,
+                 monotonic=0.0):
         super(Decoder, self).__init__()
         # store the hyperparameters
         self.idim = idim
@@ -518,6 +558,7 @@ class Decoder(torch.nn.Module):
         self.threshold = threshold
         self.maxlenratio = maxlenratio
         self.minlenratio = minlenratio
+        self.monotonic = monotonic
         # define lstm network
         self.lstm = torch.nn.ModuleList()
         for layer in six.moves.range(self.dlayers):
@@ -608,6 +649,7 @@ class Decoder(torch.nn.Module):
 
         # loop for an output sequence
         outs, logits = [], []
+        att_ws = []
         for y in ys.transpose(0, 1):
             att_c, att_w = self.att(hs, hlens, z_list[0], prev_att_w)
             prenet_out = self._prenet_forward(prev_out)
@@ -624,6 +666,8 @@ class Decoder(torch.nn.Module):
                 prev_att_w = prev_att_w + att_w  # Note: error when use +=
             else:
                 prev_att_w = att_w
+            if self.monotonic != 0.0:
+                att_ws.append(att_w)
 
         logits = torch.cat(logits, dim=1)  # (B, Lmax)
         before_outs = torch.stack(outs, dim=2)  # (B, odim, Lmax)
@@ -636,7 +680,7 @@ class Decoder(torch.nn.Module):
             before_outs = self.output_activation_fn(before_outs)
             after_outs = self.output_activation_fn(after_outs)
 
-        return after_outs, before_outs, logits
+        return after_outs, before_outs, logits, att_ws
 
     def inference(self, h, threshold=0.5, minlenratio=0.0, maxlenratio=10.0):
         """GENERATE THE SEQUENCE OF FEATURES FROM ENCODER HIDDEN STATES

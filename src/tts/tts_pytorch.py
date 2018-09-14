@@ -289,7 +289,7 @@ def train(args):
     tacotron2 = tacotron2.to(device)
 
     # define loss
-    model = Tacotron2Loss(tacotron2, args.use_masking, args.bce_pos_weight)
+    model = Tacotron2Loss(tacotron2, args.use_masking, args.bce_pos_weight, args.monotonic)
     reporter = model.reporter
 
     # Setup an optimizer
@@ -321,11 +321,12 @@ def train(args):
     # actual bathsize is included in a list
     train_iter = chainer.iterators.MultiprocessIterator(
         TransformDataset(train_batchset, converter.transform),
-        batch_size=1, n_processes=2, n_prefetch=8, maxtasksperchild=20)
+        batch_size=1, n_processes=2, n_prefetch=8)
+        #, maxtasksperchild=20)
     valid_iter = chainer.iterators.MultiprocessIterator(
         TransformDataset(valid_batchset, converter.transform),
-        batch_size=1, repeat=False, shuffle=False, n_processes=2, n_prefetch=8,
-        maxtasksperchild=20)
+        batch_size=1, repeat=False, shuffle=False, n_processes=2, n_prefetch=8)
+        #maxtasksperchild=20)
 
     # Set up a trainer
     updater = CustomUpdater(model, args.grad_clip, train_iter, optimizer, converter, device)
@@ -356,7 +357,8 @@ def train(args):
     trainer.extend(extensions.PlotReport(['main/loss', 'validation/main/loss',
                                           'main/l1_loss', 'validation/main/l1_loss',
                                           'main/mse_loss', 'validation/main/mse_loss',
-                                          'main/bce_loss', 'validation/main/bce_loss'],
+                                          'main/bce_loss', 'validation/main/bce_loss',
+                                          'main/monotonic_loss', 'validation/main/monotonic_loss'],
                                          'epoch', file_name='loss.png'))
     trainer.extend(extensions.PlotReport(['main/l1_loss', 'validation/main/l1_loss'],
                                          'epoch', file_name='l1_loss.png'))
@@ -364,6 +366,8 @@ def train(args):
                                          'epoch', file_name='mse_loss.png'))
     trainer.extend(extensions.PlotReport(['main/bce_loss', 'validation/main/bce_loss'],
                                          'epoch', file_name='bce_loss.png'))
+    trainer.extend(extensions.PlotReport(['main/monotonic_loss', 'validation/main/monotonic_loss'],
+                                         'epoch', file_name='monotonic_loss.png'))
 
     # Save snapshot for each epoch
     trainer.extend(torch_snapshot(), trigger=(1, 'epoch'))
@@ -376,9 +380,10 @@ def train(args):
     trainer.extend(extensions.LogReport(trigger=(REPORT_INTERVAL, 'iteration')))
     report_keys = ['epoch', 'iteration', 'elapsed_time',
                    'main/loss', 'main/l1_loss',
-                   'main/mse_loss', 'main/bce_loss',
+                   'main/mse_loss', 'main/bce_loss', 'main/monotonic_loss',
                    'validation/main/loss', 'validation/main/l1_loss',
-                   'validation/main/mse_loss', 'validation/main/bce_loss']
+                   'validation/main/mse_loss', 'validation/main/bce_loss',
+                   'validation/main/monotonic_loss']
     trainer.extend(extensions.PrintReport(report_keys), trigger=(REPORT_INTERVAL, 'iteration'))
     trainer.extend(extensions.ProgressBar(update_interval=REPORT_INTERVAL))
 

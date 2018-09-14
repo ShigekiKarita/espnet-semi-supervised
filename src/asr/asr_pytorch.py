@@ -266,7 +266,7 @@ def train(args):
     # actual bathsize is included in a list
     train_iter = chainer.iterators.MultiprocessIterator(
         TransformDataset(train, converter.transform),
-        batch_size=1, n_processes=1, n_prefetch=8, maxtasksperchild=20)
+        batch_size=1, n_processes=1, n_prefetch=8) #, maxtasksperchild=20)
     valid_iter = chainer.iterators.SerialIterator(
         TransformDataset(valid, converter.transform),
         batch_size=1, repeat=False, shuffle=False)
