@@ -56,6 +56,11 @@ def main():
                         help='Filename of train label data (json)')
     parser.add_argument('--valid-label', type=str, default=None,
                         help='Filename of validation label data (json)')
+    parser.add_argument('--train-utt2mode', type=str, default=None,
+                        help='Filename of train mode data (scp)')
+    parser.add_argument('--valid-utt2mode', type=str, default=None,
+                        help='Filename of validation mode data (scp)')
+
     # ASR network archtecture
     # encoder
     parser.add_argument('--etype', default='blstmp', type=str,

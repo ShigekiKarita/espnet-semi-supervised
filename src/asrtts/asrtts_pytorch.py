@@ -37,6 +37,8 @@ from asr_utils import restore_snapshot
 
 from e2e_asr_th import E2E
 from e2e_asr_th import Loss
+from e2e_asr_th import pad_list
+
 torch_is_old = False
 
 from e2e_tts_th import Tacotron2
@@ -44,6 +46,7 @@ from e2e_tts_th import Tacotron2Loss
 
 from e2e_asrtts_th import packed_mmd
 from e2e_asrtts_th import ASRTTSLoss
+from e2e_asrtts_th import get_asr_data
 from e2e_asrtts_th import get_tts_data
 
 from asrtts_utils import pad_ndarray_list
@@ -57,140 +60,55 @@ matplotlib.use('Agg')
 
 # some tuning params
 REPORT_INTERVAL = 100
-ALL_MODE = False
+ALL_MODE = True # False
 FREEZE_ATT = True
 NO_AVG = True
 MODEL_FULL = False
 
 
-class CustomConverter(object):
-    '''CUSTOM CONVERTER FOR TACOTRON2'''
-
-    def __init__(self, device, return_targets=True, use_speaker_embedding=False, spembs_dim=1):
-        self.device = device
-        self.return_targets = return_targets
-        self.use_speaker_embedding = use_speaker_embedding
-        self.spembs_dim = spembs_dim
-
-    def __call__(self, batch, is_training=True):
-        # batch should be located in list
-        assert len(batch) == 1
-        batch = batch[0]
-
-        # get eos
-        eos = str(int(batch[0][1]['output'][0]['shape'][1]) - 1)
-
-        # get target features and input character sequence
-        xs = [b[1]['output'][0]['tokenid'].split() + [eos] for b in batch]
-        ys = [kaldi_io_py.read_mat(b[1]['input'][1]['feat']) for b in batch]
-
-        # remove empty sequence and get sort along with length
-        filtered_idx = filter(lambda i: len(xs[i]) > 0, range(len(xs)))
-        sorted_idx = sorted(filtered_idx, key=lambda i: -len(xs[i]))
-        xs = [np.fromiter(map(int, xs[i]), dtype=np.int64) for i in sorted_idx]
-        ys = [ys[i] for i in sorted_idx]
-
-        # get list of lengths (must be tensor for DataParallel)
-        ilens = torch.from_numpy(np.fromiter((x.shape[0] for x in xs), dtype=np.int64))
-        olens = torch.from_numpy(np.fromiter((y.shape[0] for y in ys), dtype=np.int64))
-
-        # perform padding and convert to tensor
-        xs = torch.from_numpy(pad_ndarray_list(xs, 0)).long()
-        ys = torch.from_numpy(pad_ndarray_list(ys, 0)).float()
-
-        # make labels for stop prediction
-        labels = ys.new(ys.size(0), ys.size(1)).zero_()
-        for i, l in enumerate(olens):
-            labels[i, l - 1:] = 1
-
-        if sum(self.device) >= 0:
-            xs = xs.cuda()
-            ys = ys.cuda()
-            labels = labels.cuda()
-
-        # load speaker embedding
-        if self.use_speaker_embedding:
-            ### spembs = [kaldi_io_py.read_vec_flt(b[1]['input'][1]['feat']) for b in batch]
-            spembs = [kaldi_io_py.read_vec_flt(b[1]['input'][self.spembs_dim]['feat']) for b in batch]
-            spembs = [spembs[i] for i in sorted_idx]
-            spembs = torch.from_numpy(np.array(spembs)).float()
-            if sum(self.device) >= 0:
-                spembs = spembs.cuda()
-        else:
-            spembs = None
-
-        if self.return_targets:
-            return xs, ilens, ys, labels, olens, spembs
-        else:
-            return xs, ilens, ys, spembs
-
-
-class PlotAttentionReport(extension.Extension):
-    def __init__(self, model, data, outdir, converter=None, reverse=False):
-        self.data = copy.deepcopy(data)
-        self.outdir = outdir
-        self.converter = converter
-        self.reverse = reverse
-        if not os.path.exists(self.outdir):
-            os.makedirs(self.outdir)
-
-        # TODO(kan-bayashi): clean up this process
+from asr_utils import PlotAttentionReport
+class CustomPlotAttentionReport(PlotAttentionReport):
+    def __init__(self, model, isASR, data, outdir, reverse=False):
+        self.isASR = isASR
         if hasattr(model, "module"):
-            if hasattr(model.module, "predictor"):
-                self.att_vis_fn = model.module.predictor.calculate_all_attentions
-            else:
-                self.att_vis_fn = model.module.calculate_all_attentions
+            self.model = model.module
         else:
-            if hasattr(model, "predictor"):
-                self.att_vis_fn = model.predictor.calculate_all_attentions
-            else:
-                self.att_vis_fn = model.calculate_all_attentions
+            self.model = model
+        if isASR:
+            att_vis_fn = self.model.asr_loss.predictor.calculate_all_attentions
+        else:
+            att_vis_fn = self.model.tts_loss.model.calculate_all_attentions
+
+        converter = None
+        device = None
+        super().__init__(att_vis_fn, data, outdir, converter, device, reverse)
 
     def __call__(self, trainer):
-        if self.converter is not None:
-            # TODO(kan-bayashi): need to be fixed due to hard coding
-            x = self.converter([self.data], False)
-        else:
-            x = self.data
-        if isinstance(x, tuple):
-            att_ws = self.att_vis_fn(*x)
-        elif isinstance(x, dict):
-            att_ws = self.att_vis_fn(**x)
-        else:
-            att_ws = self.att_vis_fn(x)
+        with torch.no_grad():
+            if self.isASR:
+                asr_texts, asr_feats, asr_featlens = get_asr_torch(self.model, self.data)
+                att_ws = self.att_vis_fn(asr_feats, asr_featlens, asr_texts)
+            else:
+                tts_texts, tts_textlens, tts_feats, tts_labels, tts_featlens, spembs \
+                    = get_tts_torch(self.model, self.data)
+                att_ws = self.att_vis_fn(tts_texts, tts_textlens, tts_feats, spembs)
+
         for idx, att_w in enumerate(att_ws):
             filename = "%s/%s.ep.{.updater.epoch}.png" % (
                 self.outdir, self.data[idx][0])
             if self.reverse:
-                dec_len = int(self.data[idx][1]['input'][1]['shape'][0])
-                enc_len = int(self.data[idx][1]['output'][1]['shape'][0])
+                dec_len = int(self.data[idx][1]['input'][0]['shape'][0])
+                enc_len = int(self.data[idx][1]['output'][0]['shape'][0])
             else:
-                dec_len = int(self.data[idx][1]['output'][1]['shape'][0])
-                enc_len = int(self.data[idx][1]['input'][1]['shape'][0])
+                dec_len = int(self.data[idx][1]['output'][0]['shape'][0])
+                enc_len = int(self.data[idx][1]['input'][0]['shape'][0])
             if len(att_w.shape) == 3:
                 att_w = att_w[:, :dec_len, :enc_len]
             else:
                 att_w = att_w[:dec_len, :enc_len]
             self._plot_and_save_attention(att_w, filename.format(trainer))
 
-    def _plot_and_save_attention(self, att_w, filename):
-        # dynamically import matplotlib due to not found error
-        import matplotlib.pyplot as plt
-        if len(att_w.shape) == 3:
-            for h, aw in enumerate(att_w, 1):
-                plt.subplot(1, len(att_w), h)
-                plt.imshow(aw, aspect="auto")
-                plt.xlabel("Encoder Index")
-                plt.ylabel("Decoder Index")
-        else:
-            plt.imshow(att_w, aspect="auto")
-            plt.xlabel("Encoder Index")
-            plt.ylabel("Decoder Index")
-        plt.tight_layout()
-        plt.savefig(filename)
-        plt.close()
 
-        
 def converter_kaldi(batch, device=None, use_speaker_embedding=None):
     # batch only has one minibatch utterance, which is specified by batch[0]
     batch = batch[0]
@@ -214,6 +132,15 @@ def delete_feat(batch):
             del data[1]['feat_spembs']
 
     return batch
+
+
+def get_asr_torch(model, data):
+    asr_texts, asr_feats, asr_featlens = get_asr_data(model.asr_loss.predictor, data, 'feat')
+    asr_texts = pad_list(asr_texts, model.asr_loss.predictor.dec.ignore_id)
+    return asr_texts, asr_feats, asr_featlens
+
+def get_tts_torch(model, data):
+    return get_tts_data(model, data, 'text', use_speaker_embedding=model.tts_loss.model.spk_embed_dim)
 
 
 class CustomEvaluater(extensions.Evaluator):
@@ -251,11 +178,14 @@ class CustomEvaluater(extensions.Evaluator):
                 if data[0][1]['utt2mode'] != 'p':
                     logging.error("Error: evaluation only support a parallel data mode ('p')")
                     sys.exit()
+
+                asr_texts, asr_feats, asr_featlens = get_asr_torch(self.model, data)
+                asr_loss, asr_acc = self.model.asr_loss(asr_feats, asr_featlens, asr_texts,
+                                                        do_report=False, report_acc=True)  # disable reporter
+
                 tts_texts, tts_textlens, tts_feats, tts_labels, tts_featlens, spembs = \
                     get_tts_data(self.model, data, 'text', use_speaker_embedding=self.model.tts_loss.model.spk_embed_dim)
                 avg_textlen = float(np.mean(tts_textlens.data.cpu().numpy()))
-
-                asr_loss, asr_acc = self.model.asr_loss(data, do_report=False, report_acc=True)  # disable reporter
                 tts_loss = self.model.tts_loss(tts_texts, tts_textlens, tts_feats, tts_labels, tts_featlens,
                                                spembs=spembs, do_report=False)
                 s2s_loss = self.model.ae_speech(data)
@@ -319,7 +249,7 @@ class CustomUpdater(training.StandardUpdater):
 
     def gradient_decent(self, loss, optimizer, freeze_att=False, retain_graph=False):
         optimizer.zero_grad()  # Clear the parameter gradients
-        loss.backward(retain_graph=False)  # Backprop
+        loss.backward(retain_graph=retain_graph)  # Backprop
         loss.detach()  # Truncate the graph
 
         if freeze_att:
@@ -363,8 +293,10 @@ class CustomUpdater(training.StandardUpdater):
         data = self.converter(batch, use_speaker_embedding=self.model.tts_loss.model.spk_embed_dim)
 
         # Compute the loss at this time step and accumulate it
+        asr_texts, asr_feats, asr_featlens = get_asr_torch(self.model, data)
         tts_texts, tts_textlens, tts_feats, tts_labels, tts_featlens, spembs = \
             get_tts_data(self.model, data, 'text', use_speaker_embedding=self.model.tts_loss.model.spk_embed_dim)
+
         avg_textlen = float(np.mean(tts_textlens.data.cpu().numpy()))
         if data[0][1]['utt2mode'] == 'p':
             logging.info("parallel data mode")
@@ -375,10 +307,11 @@ class CustomUpdater(training.StandardUpdater):
             random.shuffle(modes)
             # shuffle
             loss_data_sum = 0.0
-            use_mmd = model.mmd_weight != 0.0
+            use_mmd = self.model.mmd_weight != 0.0
             for mode in modes:
                 if mode == 'asr':
-                    loss, asr_acc = self.model.asr_loss(data, do_report=False, report_acc=True)  # disable reporter
+                    loss, asr_acc = self.model.asr_loss(asr_feats, asr_featlens, asr_texts,
+                                                        do_report=False, report_acc=True)  # disable reporter
                     if NO_AVG:
                         pass
                     else:
@@ -417,7 +350,7 @@ class CustomUpdater(training.StandardUpdater):
                 loss_data = loss_data_sum / 2.0
 
             if use_mmd:
-                loss = model.mmd_weight * packed_mmd(hspad, hlens, htpad, htlens)
+                loss = self.model.mmd_weight * packed_mmd(hspad, hslen, htpad, htlen)
                 self.gradient_decent(loss, self.opts["mmd"], freeze_att=FREEZE_ATT)
                 chainer.reporter.report({'t/mmd_loss': loss.item() })
                 loss_data = (loss_data_sum + loss.item()) / 5.0
@@ -664,12 +597,16 @@ def train(args):
     dummy_target = chainer.Chain()
     opts = {}
     #opts['asr'] = torch.optim.Adadelta(model.asr_loss.parameters(), rho=0.95, eps=args.eps)
-    opts['asr'] = torch.optim.Adam(model.asr_loss.parameters(), args.lr*0.1, eps=args.eps, weight_decay=args.weight_decay)
-    opts['tts'] = torch.optim.Adam(model.tts_loss.parameters(), args.lr, eps=args.eps, weight_decay=args.weight_decay)
-    opts['s2s'] = torch.optim.Adam(model.ae_speech.parameters(), args.lr*0.01, eps=args.eps, weight_decay=args.weight_decay)
-    opts['t2t'] = torch.optim.Adam(model.ae_text.parameters(), args.lr*0.01, eps=args.eps, weight_decay=args.weight_decay)
+    if ngpu > 1:
+        module = model.module
+    else:
+        module = model
+    opts['asr'] = torch.optim.Adam(module.asr_loss.parameters(), args.lr*0.1, eps=args.eps, weight_decay=args.weight_decay)
+    opts['tts'] = torch.optim.Adam(module.tts_loss.parameters(), args.lr, eps=args.eps, weight_decay=args.weight_decay)
+    opts['s2s'] = torch.optim.Adam(module.ae_speech.parameters(), args.lr*0.01, eps=args.eps, weight_decay=args.weight_decay)
+    opts['t2t'] = torch.optim.Adam(module.ae_text.parameters(), args.lr*0.01, eps=args.eps, weight_decay=args.weight_decay)
 
-    ae_param = list(set(list(model.ae_speech.parameters()) + list(model.ae_text.parameters())))
+    ae_param = list(set(list(module.ae_speech.parameters()) + list(module.ae_text.parameters())))
     opts['mmd'] = torch.optim.Adam(ae_param, args.lr*0.01, eps=args.eps, weight_decay=args.weight_decay)
     for key in ['asr', 'tts', 's2s', 't2t', 'mmd']:
         # FIXME: TOO DIRTY HACK
@@ -681,6 +618,17 @@ def train(args):
         train_json = json.load(f)['utts']
     with open(args.valid_json, 'rb') as f:
         valid_json = json.load(f)['utts']
+
+    # read utt2mode scp
+    def load_utt2mode(scp, utts):
+        with open(scp, 'r') as f:
+            for line in f:
+                k, v = line.strip().split()
+                if k in utts.keys():
+                    utts[k]['utt2mode'] = v
+    load_utt2mode(args.train_utt2mode, train_json)
+    load_utt2mode(args.valid_utt2mode, valid_json)
+
 
     # make minibatch list (variable length)
     train = make_batchset_asrtts(train_json, args.batch_size,
@@ -732,17 +680,19 @@ def train(args):
         data = sorted(list(valid_json.items())[:args.num_save_attention],
                       key=lambda x: int(x[1]['input'][0]['shape'][1]), reverse=True)
         data = converter_kaldi([data], device=gpu_id, use_speaker_embedding=args.tts_spk_embed_dim)
-        trainer.extend(PlotAttentionReport(asr_loss, data, args.outdir + "/att_ws_asr"), trigger=(1, 'epoch'))
-        trainer.extend(PlotAttentionReport(e2e_loss.model, data, args.outdir + "/att_ws_tts",
-                                           CustomConverter(gpu_id, False, args.tts_use_speaker_embedding, 2),
-                                           True), trigger=(1, 'epoch'))
+        trainer.extend(CustomPlotAttentionReport(
+            model, True,
+            data, args.outdir + "/att_ws_asr"), trigger=(1, 'epoch'))
+        trainer.extend(CustomPlotAttentionReport(
+            model, False,
+            data, args.outdir + '/att_ws_tts', reverse=True), trigger=(1, 'epoch'))
 
     # Take a snapshot for each specified epoch
     trainer.extend(extensions.snapshot(), trigger=(1, 'epoch'))
 
     # Make a plot for training and validation values
     # report keys
-    report_keys = ['t/loss', 't/tts_loss', 't/s2s_loss', 't/asr_loss', 't/t2t_loss',
+    report_keys = ['t/loss', 't/tts_loss', 't/s2s_loss', 't/asr_loss', 't/t2t_loss', 't/mmd_loss',
                    'd/loss', 'd/tts_loss', 'd/s2s_loss', 'd/asr_loss', 'd/t2t_loss']
     trainer.extend(extensions.PlotReport(report_keys,
                                          'epoch', file_name='loss.png'))
@@ -770,7 +720,7 @@ def train(args):
 
     # Write a log of evaluation statistics for each epoch
     trainer.extend(extensions.LogReport(trigger=(REPORT_INTERVAL, 'iteration')))
-    report_keys = ['t/loss', 't/tts_loss', 't/s2s_loss', 't/asr_loss', 't/t2t_loss', 't/asr_acc', 't/t2t_acc',
+    report_keys = ['t/loss', 't/tts_loss', 't/s2s_loss', 't/asr_loss', 't/t2t_loss', 't/asr_acc', 't/t2t_acc', 't/mmd_loss',
                    'd/loss', 'd/tts_loss', 'd/s2s_loss', 'd/asr_loss', 'd/t2t_loss', 'd/asr_acc', 'd/t2t_acc']
     report_keys.append('epoch')
     report_keys.append('iteration')

@@ -144,7 +144,7 @@ class Tacotron2Loss(torch.nn.Module):
         self.monotonic = monotonic
         self.reporter = Reporter()
 
-    def forward(self, xs, ilens, ys, labels, olens=None, spembs=None):
+    def forward(self, xs, ilens, ys, labels, olens=None, spembs=None, do_report=True):
         """TACOTRON2 LOSS FORWARD CALCULATION
 
         :param torch.Tensor xs: batch of padded character ids (B, Tmax)
@@ -194,8 +194,9 @@ class Tacotron2Loss(torch.nn.Module):
         # report loss values for logging
         logging.debug("loss = %.3e (bce: %.3e, l1: %.3e, mse: %.3e)" % (
             loss.item(), bce_loss.item(), l1_loss.item(), mse_loss.item()))
-        self.reporter.report(l1_loss.item(), mse_loss.item(), bce_loss.item(), loss.item(),
-                             float(monotonic_loss))
+        if do_report:
+            self.reporter.report(l1_loss.item(), mse_loss.item(), bce_loss.item(), loss.item(),
+                                 float(monotonic_loss))
 
         return loss
 
