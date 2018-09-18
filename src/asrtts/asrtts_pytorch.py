@@ -33,7 +33,7 @@ from asr_utils import load_labeldict
 from asr_utils import make_batchset
 from asr_utils import restore_snapshot
 
-from tts_pytorch import pad_ndarray_list
+# from tts_pytorch import pad_ndarray_list
 
 from e2e_asr_th import E2E
 from e2e_asr_th import Loss
@@ -42,9 +42,12 @@ torch_is_old = False
 from e2e_tts_th import Tacotron2
 from e2e_tts_th import Tacotron2Loss
 
-from e2e_asrtts_th import mmd_loss
+from e2e_asrtts_th import packed_mmd
 from e2e_asrtts_th import ASRTTSLoss
 from e2e_asrtts_th import get_tts_data
+
+from asrtts_utils import pad_ndarray_list
+
 # for kaldi io
 import kaldi_io_py
 
@@ -58,6 +61,7 @@ ALL_MODE = False
 FREEZE_ATT = True
 NO_AVG = True
 MODEL_FULL = False
+
 
 class CustomConverter(object):
     '''CUSTOM CONVERTER FOR TACOTRON2'''
@@ -313,9 +317,9 @@ class CustomUpdater(training.StandardUpdater):
         self.opts = opts
         self.clip_grad_norm = torch.nn.utils.clip_grad_norm_
 
-    def gradient_decent(self, loss, optimizer, freeze_att=False):
+    def gradient_decent(self, loss, optimizer, freeze_att=False, retain_graph=False):
         optimizer.zero_grad()  # Clear the parameter gradients
-        loss.backward()  # Backprop
+        loss.backward(retain_graph=False)  # Backprop
         loss.detach()  # Truncate the graph
 
         if freeze_att:
@@ -371,6 +375,7 @@ class CustomUpdater(training.StandardUpdater):
             random.shuffle(modes)
             # shuffle
             loss_data_sum = 0.0
+            use_mmd = model.mmd_weight != 0.0
             for mode in modes:
                 if mode == 'asr':
                     loss, asr_acc = self.model.asr_loss(data, do_report=False, report_acc=True)  # disable reporter
@@ -393,7 +398,7 @@ class CustomUpdater(training.StandardUpdater):
                     s2s_loss_data = loss.item()
                     loss_data_sum += s2s_loss_data
                     logging.info("s2s_loss_data: %f", s2s_loss_data)
-                    self.gradient_decent(loss, self.opts[mode], freeze_att=FREEZE_ATT)
+                    self.gradient_decent(loss, self.opts[mode], freeze_att=FREEZE_ATT, retain_graph=use_mmd)
                 if mode == 't2t':
                     loss, t2t_acc, htpad, htlen = self.model.ae_text(data, return_hidden=True)
                     if NO_AVG:
@@ -403,7 +408,7 @@ class CustomUpdater(training.StandardUpdater):
                     t2t_loss_data = loss.item()
                     loss_data_sum += t2t_loss_data
                     logging.info("t2t_loss_data: %f", t2t_loss_data)
-                    self.gradient_decent(loss, self.opts[mode], freeze_att=FREEZE_ATT)
+                    self.gradient_decent(loss, self.opts[mode], freeze_att=FREEZE_ATT, retain_graph=use_mmd)
                 logging.info("loss_data_sum: %f", loss_data_sum)
 
             if ALL_MODE:
@@ -411,11 +416,8 @@ class CustomUpdater(training.StandardUpdater):
             else:
                 loss_data = loss_data_sum / 2.0
 
-            if model.mmd_weight != 0.0:
-                from torch.nn.utils.rnn import pack_padded_sequence
-                hspack = pack_padded_sequence(hspad, hslens, batch_first=True)
-                htpack = pack_padded_sequence(htpad, htlens, batch_first=True)
-                loss = model.mmd_weight * mmd_loss(hspack.data, hspack.data)
+            if use_mmd:
+                loss = model.mmd_weight * packed_mmd(hspad, hlens, htpad, htlens)
                 self.gradient_decent(loss, self.opts["mmd"], freeze_att=FREEZE_ATT)
                 chainer.reporter.report({'t/mmd_loss': loss.item() })
                 loss_data = (loss_data_sum + loss.item()) / 5.0
@@ -523,6 +525,50 @@ def make_batchset_asrtts(data, batch_size, max_length_in, max_length_out, num_ba
     return json_audio_only + json_text_only + json_parallel
 
 
+def setup_tts_loss(odim_asr, idim_tts, args):
+    from argparse import Namespace
+    # define output activation function
+    if args.tts_output_activation is None:
+        output_activation_fn = None
+    elif hasattr(torch.nn.functional, args.tts_output_activation):
+        output_activation_fn = getattr(torch.nn.functional, args.tts_output_activation)
+    else:
+        raise ValueError('there is no such an activation function. (%s)' % args.tts_output_activation)
+
+    tts_args = Namespace(
+        spk_embed_dim=args.tts_spk_embed_dim,
+        embed_dim=args.tts_embed_dim,
+        elayers=args.tts_elayers,
+        eunits=args.tts_eunits,
+        econv_layers=args.tts_econv_layers,
+        econv_chans=args.tts_econv_chans,
+        econv_filts=args.tts_econv_filts,
+        dlayers=args.tts_dlayers,
+        dunits=args.tts_dunits,
+        prenet_layers=args.tts_prenet_layers,
+        prenet_units=args.tts_prenet_units,
+        postnet_layers=args.tts_postnet_layers,
+        postnet_chans=args.tts_postnet_chans,
+        postnet_filts=args.tts_postnet_filts,
+        output_activation=output_activation_fn,
+        adim=args.tts_adim,
+        aconv_chans=args.tts_aconv_chans,
+        aconv_filts=args.tts_aconv_filts,
+        cumulate_att_w=args.tts_cumulate_att_w,
+        use_batch_norm=args.tts_use_batch_norm,
+        use_concate=args.tts_use_concate,
+        dropout=args.tts_dropout_rate,
+        zoneout=args.tts_zoneout_rate,
+        monotonic=args.tts_monotonic)
+    e2e_tts = Tacotron2(
+        idim=odim_asr,
+        odim=idim_tts,
+        args=tts_args)
+    return Tacotron2Loss(
+        model=e2e_tts,
+        use_masking=args.tts_use_masking,
+        bce_pos_weight=args.tts_bce_pos_weight)
+
 def train(args):
     '''Run training'''
     # seed setting
@@ -553,6 +599,7 @@ def train(args):
     idim_asr = int(valid_json[utts[0]]['input'][0]['shape'][1])
     idim_tts = int(valid_json[utts[0]]['input'][1]['shape'][1])
     odim_asr = int(valid_json[utts[0]]['output'][0]['shape'][1])
+    assert idim_tts == idim_asr - 3
     logging.info('#input dims for ASR: ' + str(idim_asr))
     logging.info('#input dims for TTS: ' + str(idim_tts))
     logging.info('#output dims: ' + str(odim_asr))
@@ -577,47 +624,10 @@ def train(args):
     logging.info(e2e_asr)
     asr_loss = Loss(e2e_asr, args.mtlalpha)
 
-    # define output activation function
-    if args.tts_output_activation is None:
-        output_activation_fn = None
-    elif hasattr(torch.nn.functional, args.tts_output_activation):
-        output_activation_fn = getattr(torch.nn.functional, args.tts_output_activation)
-    else:
-        raise ValueError('there is no such an activation function. (%s)' % args.tts_output_activation)
-
     # specify model architecture for TTS
     # reverse input and output dimension
-    e2e_tts = Tacotron2(
-        idim=odim_asr,
-        odim=idim_tts,
-        spk_embed_dim=args.tts_spk_embed_dim,
-        embed_dim=args.tts_embed_dim,
-        elayers=args.tts_elayers,
-        eunits=args.tts_eunits,
-        econv_layers=args.tts_econv_layers,
-        econv_chans=args.tts_econv_chans,
-        econv_filts=args.tts_econv_filts,
-        dlayers=args.tts_dlayers,
-        dunits=args.tts_dunits,
-        prenet_layers=args.tts_prenet_layers,
-        prenet_units=args.tts_prenet_units,
-        postnet_layers=args.tts_postnet_layers,
-        postnet_chans=args.tts_postnet_chans,
-        postnet_filts=args.tts_postnet_filts,
-        output_activation_fn=output_activation_fn,
-        adim=args.tts_adim,
-        aconv_chans=args.tts_aconv_chans,
-        aconv_filts=args.tts_aconv_filts,
-        cumulate_att_w=args.tts_cumulate_att_w,
-        use_batch_norm=args.tts_use_batch_norm,
-        use_concate=args.tts_use_concate,
-        dropout=args.tts_dropout_rate,
-        zoneout=args.tts_zoneout_rate)
-    logging.info(e2e_tts)
-    tts_loss = Tacotron2Loss(
-        model=e2e_tts,
-        use_masking=args.tts_use_masking,
-        bce_pos_weight=args.tts_bce_pos_weight)
+    tts_loss = setup_tts_loss(odim_asr, idim_tts, args)
+    logging.info(tts_loss)
 
     # define loss
     model = ASRTTSLoss(asr_loss, tts_loss, args)
@@ -723,7 +733,7 @@ def train(args):
                       key=lambda x: int(x[1]['input'][0]['shape'][1]), reverse=True)
         data = converter_kaldi([data], device=gpu_id, use_speaker_embedding=args.tts_spk_embed_dim)
         trainer.extend(PlotAttentionReport(asr_loss, data, args.outdir + "/att_ws_asr"), trigger=(1, 'epoch'))
-        trainer.extend(PlotAttentionReport(e2e_tts, data, args.outdir + "/att_ws_tts",
+        trainer.extend(PlotAttentionReport(e2e_loss.model, data, args.outdir + "/att_ws_tts",
                                            CustomConverter(gpu_id, False, args.tts_use_speaker_embedding, 2),
                                            True), trigger=(1, 'epoch'))
 
@@ -797,47 +807,10 @@ def recog(args):
     logging.info(e2e_asr)
     asr_loss = Loss(e2e_asr, train_args.mtlalpha)
 
-    # define output activation function
-    if train_args.tts_output_activation is None:
-        output_activation_fn = None
-    elif hasattr(torch.nn.functional, train_args.tts_output_activation):
-        output_activation_fn = getattr(torch.nn.functional, train_args.tts_output_activation)
-    else:
-        raise ValueError('there is no such an activation function. (%s)' % train_args.tts_output_activation)
-
     # specify model architecture for TTS
     # reverse input and output dimension
-    e2e_tts = Tacotron2(
-        idim=odim_asr,
-        odim=idim_asr - 3,
-        spk_embed_dim=train_args.tts_spk_embed_dim,
-        embed_dim=train_args.tts_embed_dim,
-        elayers=train_args.tts_elayers,
-        eunits=train_args.tts_eunits,
-        econv_layers=train_args.tts_econv_layers,
-        econv_chans=train_args.tts_econv_chans,
-        econv_filts=train_args.tts_econv_filts,
-        dlayers=train_args.tts_dlayers,
-        dunits=train_args.tts_dunits,
-        prenet_layers=train_args.tts_prenet_layers,
-        prenet_units=train_args.tts_prenet_units,
-        postnet_layers=train_args.tts_postnet_layers,
-        postnet_chans=train_args.tts_postnet_chans,
-        postnet_filts=train_args.tts_postnet_filts,
-        output_activation_fn=output_activation_fn,
-        adim=train_args.tts_adim,
-        aconv_chans=train_args.tts_aconv_chans,
-        aconv_filts=train_args.tts_aconv_filts,
-        cumulate_att_w=train_args.tts_cumulate_att_w,
-        use_batch_norm=train_args.tts_use_batch_norm,
-        use_concate=train_args.tts_use_concate,
-        dropout=train_args.tts_dropout_rate,
-        zoneout=train_args.tts_zoneout_rate)
-    logging.info(e2e_tts)
-    tts_loss = Tacotron2Loss(
-        model=e2e_tts,
-        use_masking=train_args.tts_use_masking,
-        bce_pos_weight=train_args.tts_bce_pos_weight)
+    tts_loss = setup_tts_loss(odim_asr, idim_asr - 3, train_args)
+    logging.info(tts_loss)
 
     # define loss
     model = ASRTTSLoss(asr_loss, tts_loss, train_args)

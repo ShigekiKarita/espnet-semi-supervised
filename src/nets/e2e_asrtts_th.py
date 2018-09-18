@@ -18,7 +18,8 @@ from e2e_asr_th import to_cuda
 from e2e_asr_th import pad_list
 from e2e_tts_th import make_mask
 
-from tts_pytorch import pad_ndarray_list
+from asrtts_utils import pad_ndarray_list
+
 
 torch_is_old = torch.__version__.startswith("0.3.")
 
@@ -43,6 +44,13 @@ def mmd_loss(xs,ys,beta=1.0):
     Ky = Ky-0.5*dia2.expand(Ny,Ny)
     Ky = torch.exp(beta*Ky).sum()/Ny/Ny
     return Kx+Ky-2*Kxy
+
+
+def packed_mmd(hspad, hslens, htpad, htlens):
+    from torch.nn.utils.rnn import pack_padded_sequence
+    hspack = pack_padded_sequence(hspad, hslens, batch_first=True)
+    htpack = pack_padded_sequence(htpad, htlens, batch_first=True)
+    return mmd_loss(hspack.data, hspack.data)
 
 
 class ASRTTSLoss(torch.nn.Module):
@@ -196,7 +204,8 @@ class AutoEncoderSpeech(torch.nn.Module):
             hpad = torch.cat([hpad_pre_spk, spembs], dim=-1)
         else:
             hpad = hpad_pre_spk
-        after_outs, before_outs, logits = self.tts_dec(hpad, hlens, tts_feats)
+
+        after_outs, before_outs, logits, att_ws = self.tts_dec(hpad, hlens.tolist(), tts_feats)
         # copied from e2e_tts_th.py
         if self.use_masking and tts_featlens is not None:
             # weight positive samples

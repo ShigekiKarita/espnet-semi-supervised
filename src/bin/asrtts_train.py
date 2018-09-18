@@ -166,6 +166,8 @@ def main():
     parser.add_argument('--tts-zoneout-rate', default=0.1, type=float,
                         help='Zoneout rate')
     # loss related
+    parser.add_argument('--tts-monotonic', default=0.0, type=float,
+                        help='Monotonic loss rate')
     parser.add_argument('--tts-use_masking', default=False, type=strtobool,
                         help='Whether to use masking in calculation of loss')
     parser.add_argument('--tts-bce_pos_weight', default=20.0, type=float,
