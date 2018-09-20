@@ -238,7 +238,7 @@ class CustomUpdater(training.StandardUpdater):
     '''Custom updater for pytorch'''
 
     def __init__(self, model, grad_clip_threshold, train_iter,
-                 opts, converter, device):
+                 opts, converter, device, args):
         super(CustomUpdater, self).__init__(
             train_iter, opts, converter=converter, device=None)
         self.model = model
@@ -246,6 +246,7 @@ class CustomUpdater(training.StandardUpdater):
         self.num_gpu = len(device)
         self.opts = opts
         self.clip_grad_norm = torch.nn.utils.clip_grad_norm_
+        self.args = args
 
     def gradient_decent(self, loss, optimizer, freeze_att=False, retain_graph=False):
         optimizer.zero_grad()  # Clear the parameter gradients
@@ -307,9 +308,13 @@ class CustomUpdater(training.StandardUpdater):
             random.shuffle(modes)
             # shuffle
             loss_data_sum = 0.0
-            use_mmd = self.model.mmd_weight != 0.0
+            use_mmd = self.args.mmd_weight != 0.0
             for mode in modes:
                 if mode == 'asr':
+                    if self.args.asr_weight == 0.0:
+                        asr_loss_data = 0  # use nan?
+                        asr_acc = 0
+                        continue
                     loss, asr_acc = self.model.asr_loss(asr_feats, asr_featlens, asr_texts,
                                                         do_report=False, report_acc=True)  # disable reporter
                     if NO_AVG:
@@ -321,18 +326,30 @@ class CustomUpdater(training.StandardUpdater):
                     logging.info("asr_loss_data: %f", asr_loss_data)
                     self.gradient_decent(loss, self.opts[mode])
                 if mode == 'tts':
-                    loss = self.model.tts_loss(tts_texts, tts_textlens, tts_feats, tts_labels, tts_featlens, spembs=spembs, do_report=False)
+                    if self.args.tts_weight == 0.0:
+                        tts_loss_data = 0  # use nan?
+                        continue
+
+                    loss = self.model.tts_loss(tts_texts, tts_textlens, tts_feats, tts_labels, tts_featlens,
+                                               spembs=spembs, do_report=False)
                     tts_loss_data = loss.item()
                     loss_data_sum += tts_loss_data
                     logging.info("tts_loss_data: %f", tts_loss_data)
                     self.gradient_decent(loss, self.opts[mode])
                 if mode == 's2s':
+                    if self.s2s_weight == 0.0 and not use_mmd:
+                        s2s_loss_data = 0.0
+                        continue
                     loss, hspad, hslen = self.model.ae_speech(data, return_hidden=True)
                     s2s_loss_data = loss.item()
                     loss_data_sum += s2s_loss_data
                     logging.info("s2s_loss_data: %f", s2s_loss_data)
-                    self.gradient_decent(loss, self.opts[mode], freeze_att=FREEZE_ATT, retain_graph=use_mmd)
+                    if self.s2s_weight != 0.0:
+                        self.gradient_decent(loss, self.opts[mode], freeze_att=FREEZE_ATT, retain_graph=use_mmd)
                 if mode == 't2t':
+                    if self.t2t_weight == 0.0 and not use_mmd:
+                        t2t_loss_data = 0.0
+                        continue
                     loss, t2t_acc, htpad, htlen = self.model.ae_text(data, return_hidden=True)
                     if NO_AVG:
                         pass
@@ -341,19 +358,19 @@ class CustomUpdater(training.StandardUpdater):
                     t2t_loss_data = loss.item()
                     loss_data_sum += t2t_loss_data
                     logging.info("t2t_loss_data: %f", t2t_loss_data)
-                    self.gradient_decent(loss, self.opts[mode], freeze_att=FREEZE_ATT, retain_graph=use_mmd)
+                    if self.t2t_weight != 0.0:
+                        self.gradient_decent(loss, self.opts[mode], freeze_att=FREEZE_ATT, retain_graph=use_mmd)
                 logging.info("loss_data_sum: %f", loss_data_sum)
 
-            if ALL_MODE:
-                loss_data = loss_data_sum / 4.0
-            else:
-                loss_data = loss_data_sum / 2.0
-
             if use_mmd:
-                loss = self.model.mmd_weight * packed_mmd(hspad, hslen, htpad, htlen)
+                loss = packed_mmd(hspad, hslen, htpad, htlen)
                 self.gradient_decent(loss, self.opts["mmd"], freeze_att=FREEZE_ATT)
                 chainer.reporter.report({'t/mmd_loss': loss.item() })
                 loss_data = (loss_data_sum + loss.item()) / 5.0
+            elif ALL_MODE:
+                loss_data = loss_data_sum / 4.0
+            else:
+                loss_data = loss_data_sum / 2.0
 
             logging.info("loss_data: %f", loss_data)
             chainer.reporter.report({'t/loss': loss_data})
@@ -601,13 +618,14 @@ def train(args):
         module = model.module
     else:
         module = model
-    opts['asr'] = torch.optim.Adam(module.asr_loss.parameters(), args.lr*0.1, eps=args.eps, weight_decay=args.weight_decay)
-    opts['tts'] = torch.optim.Adam(module.tts_loss.parameters(), args.lr, eps=args.eps, weight_decay=args.weight_decay)
-    opts['s2s'] = torch.optim.Adam(module.ae_speech.parameters(), args.lr*0.01, eps=args.eps, weight_decay=args.weight_decay)
-    opts['t2t'] = torch.optim.Adam(module.ae_text.parameters(), args.lr*0.01, eps=args.eps, weight_decay=args.weight_decay)
 
+    optim_class = getattr(torch.optim, args.optim)
+    opts['asr'] = optim_class(module.asr_loss.parameters(), args.lr*args.asr_weight, eps=args.eps, weight_decay=args.weight_decay)
+    opts['tts'] = optim_class(module.tts_loss.parameters(), args.lr*args.tts_weight, eps=args.eps, weight_decay=args.weight_decay)
+    opts['s2s'] = optim_class(module.ae_speech.parameters(), args.lr*args.s2s_weight, eps=args.eps, weight_decay=args.weight_decay)
+    opts['t2t'] = optim_class(module.ae_text.parameters(), args.lr*args.t2t_weight, eps=args.eps, weight_decay=args.weight_decay)
     ae_param = list(set(list(module.ae_speech.parameters()) + list(module.ae_text.parameters())))
-    opts['mmd'] = torch.optim.Adam(ae_param, args.lr*0.01, eps=args.eps, weight_decay=args.weight_decay)
+    opts['mmd'] = optim_class(ae_param, args.lr*args.mmd_weight, eps=args.eps, weight_decay=args.weight_decay)
     for key in ['asr', 'tts', 's2s', 't2t', 'mmd']:
         # FIXME: TOO DIRTY HACK
         setattr(opts[key], "target", dummy_target)
@@ -643,7 +661,7 @@ def train(args):
 
     # Set up a trainer
     updater = CustomUpdater(model, args.grad_clip, train_iter, opts,
-                            converter=converter_kaldi, device=gpu_id)
+                            converter=converter_kaldi, device=gpu_id, args=args)
     trainer = training.Trainer(
         updater, (args.epochs, 'epoch'), out=args.outdir)
 

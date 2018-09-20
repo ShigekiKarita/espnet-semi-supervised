@@ -177,6 +177,14 @@ def main():
                         help='Whether to use masking in calculation of loss')
     parser.add_argument('--tts-bce_pos_weight', default=20.0, type=float,
                         help='Positive sample weight in BCE calculation (only for use_masking=True)')
+    parser.add_argument('--asr_weight', default=0.1, type=float,
+                        help='ASR loss weight (lr) in multi task loss')
+    parser.add_argument('--tts_weight', default=1.0, type=float,
+                        help='TTS loss weight (lr) in multi task loss')
+    parser.add_argument('--s2s_weight', default=0.01, type=float,
+                        help='S2S loss weight (lr) in multi task loss')
+    parser.add_argument('--t2t_weight', default=0.01, type=float,
+                        help='T2T loss weight (lr) in multi task loss')
     parser.add_argument('--mmd_weight', default=1.0, type=float,
                         help='Maximum mean discrepancy loss weight between encoded speech and text')
     # minibatch related
@@ -190,8 +198,8 @@ def main():
     parser.add_argument('--maxlen-out', default=150, type=int, metavar='ML',
                         help='Batch size is reduced if the output sequence length > ML')
     # optimization related
-    parser.add_argument('--opt', default='adadelta', type=str,
-                        choices=['adadelta', 'adam'],
+    parser.add_argument('--optim', default='Adam', type=str,
+                        choices=['Adadelta', 'Adam'],
                         help='Optimizer')
     parser.add_argument('--lr', default=1e-3, type=float,
                         help='Learning rate for optimizer')

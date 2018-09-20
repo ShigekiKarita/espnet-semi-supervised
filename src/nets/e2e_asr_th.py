@@ -153,10 +153,11 @@ class Loss(torch.nn.Module):
             loss_ctc_data = float(loss_ctc)
 
         loss_data = float(self.loss)
-        if do_report and loss_data < CTC_LOSS_THRESHOLD and not math.isnan(loss_data):
-            self.reporter.report(loss_ctc_data, loss_att_data, acc, loss_data)
-        else:
-            logging.warning('loss (=%f) is not correct', loss_data)
+        if do_report:
+            if loss_data < CTC_LOSS_THRESHOLD and not math.isnan(loss_data):
+                self.reporter.report(loss_ctc_data, loss_att_data, acc, loss_data)
+            else:
+                logging.warning('loss (=%f) is not correct', loss_data)
 
         if report_acc:
             return self.loss, acc
