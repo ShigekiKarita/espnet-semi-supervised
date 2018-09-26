@@ -1,0 +1,115 @@
+% Created 2018-09-27 木 08:56
+% Intended LaTeX compiler: pdflatex
+\documentclass{ltjsarticle}
+\usepackage{url}
+\usepackage{amsmath}
+\usepackage{newtxtext,newtxmath}
+\usepackage{graphicx}
+\usepackage{luatexja}
+\usepackage[unicode]{hyperref}
+\setcounter{secnumdepth}{0}
+\author{Shigeki Karita\thanks{karita.shigeki@lab.ntt.co.jp}}
+\date{\today}
+\title{End-to-End ASR TTS Report 1}
+\hypersetup{
+ pdfauthor={Shigeki Karita},
+ pdftitle={End-to-End ASR TTS Report 1},
+ pdfkeywords={},
+ pdfsubject={},
+ pdfcreator={Emacs 25.2.2 (Org mode 9.0.3)}, 
+ pdflang={English}}
+\begin{document}
+
+\maketitle
+\begin{abstract}
+2018/09/27 meeting
+\end{abstract}
+
+\section*{Overview}
+\label{sec:orgd1881bf}
+
+\begin{itemize}
+\item INTERSPEECH2018: combining ASR and text-to-text (T2T) with inter-domain loss (KL, MMD) to train with unsupervised datasets in WSJ
+\item NEXT: combining ASR, text-to-speech (TTS), T2T, speech-to-speech (S2S) with MMD to improve unsupervised learning in Librispeech
+\end{itemize}
+
+I call this model ASR/TTS/T2T/S2S
+
+\begin{itemize}
+\item ASR/TTS task Librispeech train\_clean\_100
+\item S2S task Librispeech train\_clean\_360
+\item T2T task Librispeech train\_other\_500
+\end{itemize}
+
+\section*{Issues}
+\label{sec:orge4522f5}
+
+\begin{itemize}
+\item (Librispeech ESPnet baseline) I could not run unigram 5000 model because of its GPU memory requirement
+\item Instead of unigram baseline, I used char baseline here
+\item ASR/TTS/T2T/S2S is very slow (4-6 times slower than ASR only. about 10 days)
+\begin{itemize}
+\item also char model
+\item smaller minibatch training (current setting: 20 samples x 4 tasks)
+\item difficult to find the best learning rate for each tasks (current setting: ASR 1e-3, TTS 1e-3, S2S 1e-4, T2T 1e-4)
+\end{itemize}
+\end{itemize}
+
+\section*{Results}
+\label{sec:orgf9b8afa}
+
+\begin{itemize}
+\item char-based ASR baseline (Librispeech clean 100)
+
+\item char-based ASR/TTS/T2T/S2S without MMD
+
+\item char-based ASR/TTS/T2T/S2S with MMD
+\end{itemize}
+
+
+We need discussion what to investigate (too many combination)
+
+\begin{table}[htbp]
+\caption{\label{tab:orgc45a865}
+current running experiments (WIP)}
+\centering
+\begin{tabular}{lrrrrl}
+name & ASR & TTS & S2S & T2T & MMD\\
+\hline
+ASR (baseline) & 1 & 0 & 0 & 0 & 0\\
+ASR/T2T (INTERPSEECH2018) & 1 & 0 & 0 & 1 & 1,0\\
+ASR/S2S & 1 & 0 & 1 & 0 & 1,0\\
+ASR/S2S/T2T & 1 & 0 & 1 & 1 & 1,0\\
+ASR/TTS & 1 & 1 & 0 & 0 & 0\\
+ASR/TTS/S2S/T2T & 1 & 1 & 1 & 1 & 1,0\\
+\end{tabular}
+\end{table}
+
+\subsection*{WIP results}
+\label{sec:org29879a2}
+
+\begin{center}
+\begin{tabular}{lrrrrrrrrrl}
+name & dev\_clean Acc & dev\_clean CER & test\_clean CER & dev\_clean WER & test\_clean WER & dev\_other CER & test\_other CER & dev\_other WER & test\_other WER & path\\
+ASR (baseline) & 87.5 & 9.4 & 9.1 & 24.3 & 23.6 & 26.2 & 27.6 & 52.8 & 55.0 & ../baseline\\
+ASR/TTS/S2S/T2T with MMD & 86.0 & 14.7 & 15.4 & 27.0 & 27.7 & 33.2 & 34.5 & 56.6 & 58.4 & ./exp/train\_960\_data\_short\_sbatch2\_ngpu1\_lr1e-3\_bs32\_mmd1.0\_epoch19\\
+ASR/TTS/S2S/T2T without MMD & 85.7 &  &  &  &  &  &  &  &  & \\
+\end{tabular}
+\end{center}
+
+\section*{???}
+\label{sec:orga22fc8a}
+
+\begin{itemize}
+\item End-to-End ASR:         argmax\_t p(t|s)
+\item End-to-End ASR with LM: argmax\_t p(t|s) p(t)  <- ???
+\item DNN-HMM hybrid ASR:     argmax\_t p(s|t) p(t)
+\end{itemize}
+
+p(s|t) can be probabilitic end-to-end TTS model?
+
+\begin{itemize}
+\item End-to-End ASR with TTS-LM:  argmax\_t p\_asr(t|s) p\_tts(s|t) p\_lm(t)
+\end{itemize}
+Emacs 25.2.2 (Org mode 9.0.3)
+\end{document}
