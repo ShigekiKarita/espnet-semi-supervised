@@ -322,6 +322,8 @@ class CustomUpdater(training.StandardUpdater):
                     else:
                         loss = loss/avg_textlen
                     asr_loss_data = loss.item()
+                    chainer.reporter.report({'t/asr_loss': asr_loss_data})
+                    chainer.reporter.report({'t/asr_acc': asr_acc})
                     loss_data_sum += asr_loss_data
                     logging.info("asr_loss_data: %f", asr_loss_data)
                     self.gradient_decent(loss, self.opts[mode])
@@ -333,21 +335,23 @@ class CustomUpdater(training.StandardUpdater):
                     loss = self.model.tts_loss(tts_texts, tts_textlens, tts_feats, tts_labels, tts_featlens,
                                                spembs=spembs, do_report=False)
                     tts_loss_data = loss.item()
+                    chainer.reporter.report({'t/tts_loss': tts_loss_data})
                     loss_data_sum += tts_loss_data
                     logging.info("tts_loss_data: %f", tts_loss_data)
                     self.gradient_decent(loss, self.opts[mode])
                 if mode == 's2s':
-                    if self.s2s_weight == 0.0 and not use_mmd:
+                    if self.args.s2s_weight == 0.0 and not use_mmd:
                         s2s_loss_data = 0.0
                         continue
                     loss, hspad, hslen = self.model.ae_speech(data, return_hidden=True)
                     s2s_loss_data = loss.item()
+                    chainer.reporter.report({'t/s2s_loss': s2s_loss_data})
                     loss_data_sum += s2s_loss_data
                     logging.info("s2s_loss_data: %f", s2s_loss_data)
-                    if self.s2s_weight != 0.0:
+                    if self.args.s2s_weight != 0.0:
                         self.gradient_decent(loss, self.opts[mode], freeze_att=FREEZE_ATT, retain_graph=use_mmd)
                 if mode == 't2t':
-                    if self.t2t_weight == 0.0 and not use_mmd:
+                    if self.args.t2t_weight == 0.0 and not use_mmd:
                         t2t_loss_data = 0.0
                         continue
                     loss, t2t_acc, htpad, htlen = self.model.ae_text(data, return_hidden=True)
@@ -356,9 +360,11 @@ class CustomUpdater(training.StandardUpdater):
                     else:
                         loss = loss/avg_textlen
                     t2t_loss_data = loss.item()
+                    chainer.reporter.report({'t/t2t_loss': t2t_loss_data})
+                    chainer.reporter.report({'t/t2t_acc': t2t_acc})
                     loss_data_sum += t2t_loss_data
                     logging.info("t2t_loss_data: %f", t2t_loss_data)
-                    if self.t2t_weight != 0.0:
+                    if self.args.t2t_weight != 0.0:
                         self.gradient_decent(loss, self.opts[mode], freeze_att=FREEZE_ATT, retain_graph=use_mmd)
                 logging.info("loss_data_sum: %f", loss_data_sum)
 
@@ -374,14 +380,6 @@ class CustomUpdater(training.StandardUpdater):
 
             logging.info("loss_data: %f", loss_data)
             chainer.reporter.report({'t/loss': loss_data})
-            chainer.reporter.report({'t/asr_loss': asr_loss_data})
-            chainer.reporter.report({'t/tts_loss': tts_loss_data})
-            chainer.reporter.report({'t/asr_acc': asr_acc})
-            if ALL_MODE:
-                chainer.reporter.report({'t/s2s_loss': s2s_loss_data})
-                chainer.reporter.report({'t/t2t_loss': t2t_loss_data})
-                chainer.reporter.report({'t/t2t_acc': t2t_acc})
-
         elif data[0][1]['utt2mode'] == 'a':
             logging.info("audio only mode")
             s2s_loss = self.model.ae_speech(data)
