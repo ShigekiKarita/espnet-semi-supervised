@@ -88,11 +88,11 @@ maxlen_in=400  # if input length  > maxlen_in, batchsize is automatically reduce
 maxlen_out=150 # if output length > maxlen_out, batchsize is automatically reduced
 
 # optimization related
-opt=adam
+opt=Adam
 lr=1e-3
 eps=1e-6
 weight_decay=0.0
-epochs=30
+epochs=20
 asr_weight=0.1
 tts_weight=1.0
 s2s_weight=0.01
@@ -344,7 +344,7 @@ mkdir -p ${lmexpdir}
 # fi
 
 if [ -z ${tag} ]; then
-    expdir=exp/${exp_prefix}${train_set}_${data_type}_${etype}_e${elayers}_subsample${subsample}_unit${eunits}_proj${eprojs}_d${dlayers}_unit${dunits}_${atype}_adim_${adim}_aconvc${aconv_chans}_aconvf${aconv_filts}_mtlalpha${mtlalpha}_${opt}_bs${batchsize}_mli${maxlen_in}_mlo${maxlen_out}_weight_asr${asr_weight}_tts${tts_weight}_s2s${s2s_weight}_t2t${t2t_weight}
+    expdir=exp/${exp_prefix}${train_set}_${data_type}_${etype}_e${elayers}_subsample${subsample}_unit${eunits}_proj${eprojs}_d${dlayers}_unit${dunits}_${atype}_adim_${adim}_aconvc${aconv_chans}_aconvf${aconv_filts}_mtlalpha${mtlalpha}_${opt}_bs${batchsize}_mli${maxlen_in}_mlo${maxlen_out}_weight_asr${asr_weight}_tts${tts_weight}_s2s${s2s_weight}_t2t${t2t_weight}_mmd${mmd_weight}
     if ${do_delta}; then
         expdir=${expdir}_delta
     fi
