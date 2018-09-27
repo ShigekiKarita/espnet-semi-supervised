@@ -50,7 +50,7 @@ def packed_mmd(hspad, hslens, htpad, htlens):
     from torch.nn.utils.rnn import pack_padded_sequence
     hspack = pack_padded_sequence(hspad, hslens, batch_first=True)
     htpack = pack_padded_sequence(htpad, htlens, batch_first=True)
-    return mmd_loss(hspack.data, hspack.data)
+    return mmd_loss(hspack.data, htpack.data)
 
 
 class ASRTTSLoss(torch.nn.Module):

@@ -370,8 +370,8 @@ class CustomUpdater(training.StandardUpdater):
 
             if use_mmd:
                 loss = packed_mmd(hspad, hslen, htpad, htlen)
-                self.gradient_decent(loss, self.opts["mmd"], freeze_att=FREEZE_ATT)
                 chainer.reporter.report({'t/mmd_loss': loss.item() })
+                self.gradient_decent(loss, self.opts["mmd"], freeze_att=FREEZE_ATT)
                 loss_data = (loss_data_sum + loss.item()) / 5.0
             elif ALL_MODE:
                 loss_data = loss_data_sum / 4.0
