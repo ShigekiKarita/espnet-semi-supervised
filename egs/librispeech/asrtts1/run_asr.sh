@@ -436,13 +436,13 @@ if [ ${stage} -le 6 ]; then
         ngpu=0
 
         ${decode_cmd} JOB=1:${nj} ${expdir}/${decode_dir}/log/decode.JOB.log \
-            asrtts_recog.py \
+            asr_recog.py \
             --ngpu ${ngpu} \
             --backend ${backend} \
             --recog-json ${feat_recog_dir}/split${nj}utt/data.JOB.json \
             --result-label ${expdir}/${decode_dir}/data.JOB.json \
             --model ${expdir}/results/model.${recog_model}  \
-            --model-conf ${expdir}/results/model.conf  \
+            --model-conf ${expdir}/results/model.json  \
             --beam-size ${beam_size} \
             --penalty ${penalty} \
             --maxlenratio ${maxlenratio} \
@@ -458,4 +458,3 @@ if [ ${stage} -le 6 ]; then
     wait
     echo "Finished"
 fi
-
