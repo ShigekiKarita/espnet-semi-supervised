@@ -62,7 +62,7 @@ We need discussion what to investigate (too many combination)
 | retraining ASR/T2T wip         |          |          88.9 |               |                |               |                |               |                |               |                |                                                             |   |   |   |   |   |   |   |   |   |
 
 NOTE all retraining result is at epoch 3rd.
-TODO add t2t/s2s dev loss
+TODOs add t2t/s2s dev loss
 
 * Discussion Notes
 
@@ -72,7 +72,7 @@ TODO add t2t/s2s dev loss
 - TTS loss' large degradation in retraining -> retraining TTS need smaller lr unlike flat-start training?
 - 
 
-* TODO
+* TODOs
 
 - 10/81 -> 50/50 pair/unpair sampling during training (it should be faster than current scheme)
 - TTS 460 baseline wav decoding to confirm TTS difficulty
