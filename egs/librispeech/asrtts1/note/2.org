@@ -1,0 +1,89 @@
+#+TITLE: End-to-End ASR TTS Report 2
+#+AUTHOR: Shigeki Karita
+#+LANGUAGE: en
+#+EMAIL: karita.shigeki@lab.ntt.co.jp
+
+# org.css
+#+OPTIONS: toc:nil num:0 H:4 ^:nil pri:t author:t creator:t timestamp:t email:t
+#+HTML_HEAD: <link rel="stylesheet" type="text/css" href="css/org.css"/>
+
+#+BEGIN_abstract
+2018/10/04 meeting
+#+END_abstract
+
+* Overview
+
+- INTERSPEECH2018: combining ASR and text-to-text (T2T) with inter-domain loss (KL, MMD) to train with unsupervised datasets in WSJ
+- NEXT: combining ASR, text-to-speech (TTS), T2T, speech-to-speech (S2S) with MMD to improve unsupervised learning in Librispeech
+
+I call this model ASR/TTS/T2T/S2S
+
+- ASR/TTS task Librispeech train_clean_100
+- S2S task Librispeech train_clean_360
+- T2T task Librispeech train_other_500
+
+* Issues
+
+- (Librispeech ESPnet baseline) I could not run unigram 5000 model because of its GPU memory requirement
+  - *SOLVED* related to server issues (large memory job was running there?)
+
+- Instead of unigram baseline, I used char baseline here
+- ASR/TTS/T2T/S2S is very slow (4-6 times slower than ASR only. about 10 days)
+  - also char model
+  - smaller minibatch training (current setting: 20 samples x 4 tasks)
+  - difficult to find the best learning rate for each tasks (current setting: ASR 1e-3, TTS 1e-3, S2S 1e-4, T2T 1e-4)
+    - *UPDATED* current setting: ASR 1e-4, TTS 1e-3, S2S 1e-5, T2T 1e-5, MMD1e-5
+
+* Previous Discussions
+
+- 
+
+* Results
+
+- char-based ASR baseline (Librispeech clean 100)
+
+- char-based ASR/TTS/T2T/S2S without MMD
+
+- char-based ASR/TTS/T2T/S2S with MMD
+
+
+We need discussion what to investigate (too many combination)
+
+#+CAPTION: current running experiments (WIP)
+#+NAME: exp-table
+| name                      | ASR | TTS | S2S | T2T | MMD |
+|---------------------------+-----+-----+-----+-----+-----|
+| ASR (baseline)            |   1 |   0 |   0 |   0 | 0   |
+| ASR/T2T (INTERPSEECH2018) |   1 |   0 |   0 |   1 | 1,0 |
+| ASR/S2S                   |   1 |   0 |   1 |   0 | 1,0 |
+| ASR/S2S/T2T               |   1 |   0 |   1 |   1 | 1,0 |
+| ASR/TTS                   |   1 |   1 |   0 |   0 | 0   |
+| ASR/TTS/S2S/T2T           |   1 |   1 |   1 |   1 | 1,0 |
+
+** WIP results 
+
+| name                                    | dev TTS loss | dev_clean Acc | dev_clean CER | test_clean CER | dev_clean WER | test_clean WER | dev_other CER | test_other CER | dev_other WER | test_other WER | path                                                        |   |   |   |   |   |   |   |   |   |
+| ASR (baseline train_clean_100)          |              |          87.5 |          12.2 |           11.9 |          22.8 |           22.5 |          28.5 |           30.1 |          49.4 |           51.8 | ./exp/train_clean_100_data_short_asr_vggblstmp_32           |   |   |   |   |   |   |   |   |   |
+| TTS (baseline train_clean_100)          |         0.78 |               |               |                |               |                |               |                |               |                |                                                             |   |   |   |   |   |   |   |   |   |
+| flatstart ASR/TTS/S2S/T2T               |              |          85.7 |               |                |               |                |               |                |               |                |                                                             |   |   |   |   |   |   |   |   |   |
+| flatstart ASR/TTS/S2S/T2T with MMD      |         0.75 |          86.0 |          14.7 |           15.4 |          27.0 |           27.7 |          33.2 |           34.5 |          56.6 |           58.4 | ./exp/train_960_data_short_sbatch2_ngpu1_lr1e-3_bs32_mmd1.0 |   |   |   |   |   |   |   |   |   |
+| retraining ASR/TTS/S2S/T2T with MMD wip |         4.76 |          88.9 |               |                |               |                |               |                |               |                |                                                             |   |   |   |   |   |   |   |   |   |
+| retraining ASR/TTS/S2S with MMD wip     |              |          88.9 |               |                |               |                |               |                |               |                |                                                             |   |   |   |   |   |   |   |   |   |
+| retraining ASR/TTS/T2T with MMD wip     |              |          89.0 |               |                |               |                |               |                |               |                |                                                             |   |   |   |   |   |   |   |   |   |
+| retraining ASR/TTS with MMD wip         |         2.34 |          89.0 |               |                |               |                |               |                |               |                |                                                             |   |   |   |   |   |   |   |   |   |
+
+
+* Next
+
+- 10/81 -> 50/50 pair/unpair sampling during training
+- TTS improvement
+
+* ???
+
+- End-to-End ASR:         argmax_t p(t|s)
+- End-to-End ASR with LM: argmax_t p(t|s) p(t)  <- ???
+- DNN-HMM hybrid ASR:     argmax_t p(s|t) p(t)
+
+p(s|t) can be probabilitic end-to-end TTS model?
+
+- End-to-End ASR with TTS-LM:  argmax_t p_asr(t|s) p_tts(s|t) p_lm(t)
