@@ -877,3 +877,96 @@ def recog(args):
     # TODO(watanabe) fix character coding problems when saving it
     with open(args.result_label, 'wb') as f:
         f.write(json.dumps({'utts': new_json}, indent=4, sort_keys=True).encode('utf_8'))
+
+
+def tts_decode(args):
+    '''RUN DECODING'''
+    # read training config
+    # idim, odim, train_args = get_model_conf(args.model, args.model_conf)
+    # seed setting
+    torch.manual_seed(args.seed)
+
+    # show argments
+    for key in sorted(vars(args).keys()):
+        logging.info('ARGS: ' + key + ': ' + str(vars(args)[key]))
+
+    # read training config
+    with open(args.model_conf, "rb") as f:
+        logging.info('reading a model config file from' + args.model_conf)
+        idim_asr, odim_asr, train_args = pickle.load(f)
+
+    for key in sorted(vars(args).keys()):
+        logging.info('ARGS: ' + key + ': ' + str(vars(args)[key]))
+
+    # specify model architecture
+    logging.info('reading model parameters from' + args.model)
+    e2e_asr = E2E(idim_asr, odim_asr, train_args)
+    logging.info(e2e_asr)
+    asr_loss = Loss(e2e_asr, train_args.mtlalpha)
+
+    # specify model architecture for TTS
+    # reverse input and output dimension
+    tts_loss = setup_tts_loss(odim_asr, idim_asr - 3, train_args)
+    logging.info(tts_loss)
+
+    # define loss
+    model = ASRTTSLoss(asr_loss, tts_loss, train_args)
+
+    def cpu_loader(storage, location):
+        return storage
+
+    def remove_dataparallel(state_dict):
+        from collections import OrderedDict
+        new_state_dict = OrderedDict()
+        for k, v in state_dict.items():
+            if k.startswith("module."):
+                k = k[7:]
+            new_state_dict[k] = v
+        return new_state_dict
+
+    model.load_state_dict(remove_dataparallel(torch.load(args.model, map_location=cpu_loader)))
+
+    # define model
+    tacotron2 = Tacotron2(idim, odim, train_args)
+    eos = str(tacotron2.idim - 1)
+
+    # load trained model parameters
+    logging.info('reading model parameters from ' + args.model)
+    torch_load(args.model, tacotron2)
+    tacotron2.eval()
+
+    # set torch device
+    device = torch.device("cuda" if args.ngpu > 0 else "cpu")
+    tacotron2 = tacotron2.to(device)
+
+    # read json data
+    with open(args.json, 'rb') as f:
+        js = json.load(f)['utts']
+
+    # chech direcitory
+    outdir = os.path.dirname(args.out)
+    if len(outdir) != 0 and not os.path.exists(outdir):
+        os.makedirs(outdir)
+
+    # write to ark and scp file (see https://github.com/vesis84/kaldi-io-for-python)
+    arkscp = 'ark:| copy-feats --print-args=false ark:- ark,scp:%s.ark,%s.scp' % (args.out, args.out)
+    with torch.no_grad(), kaldi_io_py.open_or_fd(arkscp, 'wb') as f:
+        for idx, utt_id in enumerate(js.keys()):
+            x = js[utt_id]['output'][0]['tokenid'].split() + [eos]
+            x = np.fromiter(map(int, x), dtype=np.int64)
+            x = torch.LongTensor(x).to(device)
+
+            # get speaker embedding
+            if train_args.use_speaker_embedding:
+                spemb = kaldi_io_py.read_vec_flt(js[utt_id]['input'][1]['feat'])
+                spemb = torch.FloatTensor(spemb).to(device)
+            else:
+                spemb = None
+
+            # decode and write
+            outs, _, _ = tacotron2.inference(x, args, spemb)
+            if outs.size(0) == x.size(0) * args.maxlenratio:
+                logging.warn("output length reaches maximum length (%s)." % utt_id)
+            logging.info('(%d/%d) %s (size:%d->%d)' % (
+                idx + 1, len(js.keys()), utt_id, x.size(0), outs.size(0)))
+            kaldi_io_py.write_mat(f, outs.cpu().numpy(), utt_id)
