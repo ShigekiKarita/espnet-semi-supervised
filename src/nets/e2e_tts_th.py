@@ -453,7 +453,7 @@ class Encoder(torch.nn.Module):
             batch_first=True,
             bidirectional=True)
 
-    def forward(self, xs, ilens):
+    def forward(self, xs, ilens, return_feat=False):
         """CHARACTER ENCODER FORWARD CALCULATION
 
         :param torch.Tensor xs: batch of padded character ids (B, Tmax)
@@ -471,11 +471,13 @@ class Encoder(torch.nn.Module):
                 xs += self.convs[l](xs)
             else:
                 xs = self.convs[l](xs)
-        xs = pack_padded_sequence(xs.transpose(1, 2), ilens, batch_first=True)
+        feat = xs.transpose(1, 2)
+        xs = pack_padded_sequence(feat, ilens, batch_first=True)
         self.blstm.flatten_parameters()
         xs, _ = self.blstm(xs)  # (B, Tmax, C)
         xs, hlens = pad_packed_sequence(xs, batch_first=True)
-
+        if return_feat:
+            return xs, list(map(int, hlens)), feat, ilens
         return xs, list(map(int, hlens))
 
     def inference(self, x):

@@ -1591,7 +1591,7 @@ class Decoder(torch.nn.Module):
     def zero_state(self, hs_pad):
         return hs_pad.new_zeros(hs_pad.size(0), self.dunits)
 
-    def forward(self, hs_pad, hlens, ys_pad):
+    def forward(self, hs_pad, hlens, ys_pad, return_feat=False):
         '''Decoder forward
 
         :param torch.Tensor hs_pad: batch of padded hidden state sequences (B, Tmax, D)
@@ -1649,7 +1649,8 @@ class Decoder(torch.nn.Module):
                     z_list[l - 1], (z_list[l], c_list[l]))
             z_all.append(z_list[-1])
 
-        z_all = torch.stack(z_all, dim=1).view(batch * olength, self.dunits)
+        out_feat = torch.stack(z_all, dim=1)
+        z_all = out_feat.view(batch * olength, self.dunits)
         # compute loss
         y_all = self.output(z_all)
         self.loss = F.cross_entropy(y_all, ys_out_pad.view(-1),
@@ -1683,6 +1684,8 @@ class Decoder(torch.nn.Module):
             loss_reg = - torch.sum((F.log_softmax(y_all, dim=1) * self.vlabeldist).view(-1), dim=0) / len(ys_in)
             self.loss = (1. - self.lsm_weight) * self.loss + self.lsm_weight * loss_reg
 
+        if return_feat:
+            return self.loss, acc, out_feat
         return self.loss, acc
 
     def recognize_beam(self, h, lpz, recog_args, char_list, rnnlm=None):
@@ -1983,7 +1986,7 @@ class Encoder(torch.nn.Module):
 
         self.etype = etype
 
-    def forward(self, xs_pad, ilens):
+    def forward(self, xs_pad, ilens, return_feat=False):
         '''Encoder forward
 
         :param torch.Tensor xs_pad: batch of padded input sequences (B, Tmax, D)
@@ -1993,13 +1996,17 @@ class Encoder(torch.nn.Module):
         '''
         if self.etype == 'blstm':
             xs_pad, ilens = self.enc1(xs_pad, ilens)
+            feat, feat_len = xs_pad, ilens
         elif self.etype == 'blstmp':
             xs_pad, ilens = self.enc1(xs_pad, ilens)
+            feat, feat_len = xs_pad, ilens
         elif self.etype == 'vggblstmp':
             xs_pad, ilens = self.enc1(xs_pad, ilens)
+            feat, feat_len = xs_pad, ilens
             xs_pad, ilens = self.enc2(xs_pad, ilens)
         elif self.etype == 'vggblstm':
             xs_pad, ilens = self.enc1(xs_pad, ilens)
+            feat, feat_len = xs_pad, ilens
             xs_pad, ilens = self.enc2(xs_pad, ilens)
         else:
             logging.error(
@@ -2008,7 +2015,8 @@ class Encoder(torch.nn.Module):
 
         # perform explicit maksing for padded part
         xs_pad = fill_padded_part(xs_pad, ilens, 0.0)
-
+        if return_feat:
+            return xs_pad, ilens, feat, feat_len
         return xs_pad, ilens
 
 

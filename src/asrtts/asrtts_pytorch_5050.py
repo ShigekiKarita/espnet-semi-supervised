@@ -45,6 +45,7 @@ from e2e_tts_th import Tacotron2
 from e2e_tts_th import Tacotron2Loss
 
 from distance_th import packed_mmd
+from distance_th import packed_gauss_kld
 from e2e_asrtts_th import ASRTTSLoss
 from e2e_asrtts_th import get_asr_data
 from e2e_asrtts_th import get_tts_data
@@ -237,21 +238,30 @@ def update_parameters(att):
 class CustomUpdater(training.StandardUpdater):
     '''Custom updater for pytorch'''
 
-    def __init__(self, model, grad_clip_threshold, train_iter,
+    def __init__(self, model, grad_clip_threshold, train_iter, train_multi,
                  opts, converter, device, args):
         super(CustomUpdater, self).__init__(
             train_iter, opts, converter=converter, device=None)
         self.model = model
+        self.train_multi = train_multi
         self.grad_clip_threshold = grad_clip_threshold
         self.num_gpu = len(device)
         self.opts = opts
         self.clip_grad_norm = torch.nn.utils.clip_grad_norm_
         self.args = args
+        self.len_pair = len(train_multi["pair"])
+        self.reset_idx()
 
-    def gradient_decent(self, loss, optimizer, freeze_att=False, retain_graph=False):
-        optimizer.zero_grad()  # Clear the parameter gradients
-        loss.backward(retain_graph=retain_graph)  # Backprop
-        loss.detach()  # Truncate the graph
+    def reset_idx(self):
+        self.iter_idx = 0
+        self.speech_idx = np.random.permutation(self.len_pair)
+        self.text_idx = np.random.permutation(self.len_pair)
+
+    def gradient_decent(self, loss, optimizer, freeze_att=False, retain_graph=False, backward=True):
+        if backward:
+            optimizer.zero_grad()  # Clear the parameter gradients
+            loss.backward(retain_graph=retain_graph)  # Backprop
+            loss.detach()  # Truncate the graph
 
         if freeze_att:
             update_parameters(self.model.tts_loss.model.dec.att)
@@ -282,8 +292,70 @@ class CustomUpdater(training.StandardUpdater):
         train_iter = self.get_iterator('main')
 
         # Get the next batch ( a list of json files)
-        batch = train_iter.__next__()
+        pair_batch = train_iter.__next__()
+        self.update_core_impl(pair_batch)
+        # update autoencoding
+        speech_batch = [self.train_multi["speech"][self.speech_idx[self.iter_idx]]]
+        text_batch = [self.train_multi["text"][self.text_idx[self.iter_idx]]]
+        if self.args.use_mmd_autoencoding:
+            self.update_core_impl_autoencode(speech_batch, text_batch)
+        else:
+            self.update_core_impl(speech_batch)
+            self.update_core_impl(text_batch)
 
+        self.iter_idx += 1
+        if self.iter_idx == self.len_pair:
+            self.reset_idx()
+
+    def update_core_impl_autoencode(self, speech_batch, text_batch):
+        # read scp files
+        # x: original json with loaded features
+        #    will be converted to chainer variable later
+        # batch only has one minibatch utterance, which is specified by batch[0]
+        s_data = self.converter(speech_batch, use_speaker_embedding=self.model.tts_loss.model.spk_embed_dim)
+        t_data = self.converter(text_batch, use_speaker_embedding=self.model.tts_loss.model.spk_embed_dim)
+        for data in (s_data, t_data):
+            asr_texts, asr_feats, asr_featlens = get_asr_torch(self.model, data)
+            tts_texts, tts_textlens, tts_feats, tts_labels, tts_featlens, spembs = \
+                get_tts_data(self.model, data, 'text', use_speaker_embedding=self.model.tts_loss.model.spk_embed_dim)
+            avg_textlen = float(np.mean(tts_textlens.data.cpu().numpy()))
+            if data[0][1]['utt2mode'] == 'a':
+                logging.info("audio only mode")
+                result = self.model.ae_speech(data, return_hidden=True, return_inout=self.args.use_inout_mmd)
+                s2s_loss, hspad, hslen = result
+                loss_data = s2s_loss.item()
+                logging.info("loss: %f", loss_data)
+                chainer.reporter.report({'t/s2s_loss': loss_data})
+            elif data[0][1]['utt2mode'] == 't':
+                logging.info("text only mode")
+                # t2t_loss, t2t_acc = self.model.ae_text(data)
+                result = self.model.ae_text(data, return_hidden=True, return_inout=self.args.use_inout_mmd)
+                t2t_loss, t2t_acc, htpad, htlen = result
+                loss_data = t2t_loss.item()
+                logging.info("loss: %f", loss_data)
+                chainer.reporter.report({'t/t2t_loss': loss_data})
+                chainer.reporter.report({'t/t2t_acc': t2t_acc})
+            else:
+                logging.error("Error: cannot find correct mode ('a', 't')")
+                sys.exit()
+
+        self.opts["s2s"].zero_grad()
+        self.opts["t2t"].zero_grad()
+        if self.args.inter_domain_loss == "kl":
+            domain_loss_fun = packed_gauss_kld
+        else:
+            domain_loss_fun = packed_mmd
+        mmd_loss = domain_loss_fun(hspad, hslen, htpad, htlen)
+        chainer.reporter.report({'t/ae_mmd_loss': mmd_loss.item() })
+        loss = self.args.s2s_weight * s2s_loss + self.args.t2t_weight * t2t_loss + self.args.mmd_weight * mmd_loss
+        loss.backward()
+        self.gradient_decent(loss, self.opts['s2s'], freeze_att=FREEZE_ATT, backward=False)
+        self.gradient_decent(loss, self.opts['t2t'], freeze_att=FREEZE_ATT, backward=False)
+        delete_feat(s_data)
+        delete_feat(t_data)
+
+
+    def update_core_impl(self, batch):
         # read scp files
         # x: original json with loaded features
         #    will be converted to chainer variable later
@@ -343,7 +415,11 @@ class CustomUpdater(training.StandardUpdater):
                     if self.args.s2s_weight == 0.0 and not use_mmd:
                         s2s_loss_data = 0.0
                         continue
-                    loss, hspad, hslen = self.model.ae_speech(data, return_hidden=True)
+                    result = self.model.ae_speech(data, return_hidden=True, return_inout=self.args.use_inout_mmd)
+                    if self.args.use_inout_mmd:
+                        loss, speech_in, speech_in_len, speech_out, speech_out_len = result
+                    else:
+                        loss, hspad, hslen = result
                     s2s_loss_data = loss.item()
                     chainer.reporter.report({'t/s2s_loss': s2s_loss_data})
                     loss_data_sum += s2s_loss_data
@@ -354,7 +430,11 @@ class CustomUpdater(training.StandardUpdater):
                     if self.args.t2t_weight == 0.0 and not use_mmd:
                         t2t_loss_data = 0.0
                         continue
-                    loss, t2t_acc, htpad, htlen = self.model.ae_text(data, return_hidden=True)
+                    result = self.model.ae_text(data, return_hidden=True, return_inout=self.args.use_inout_mmd)
+                    if self.args.use_inout_mmd:
+                        loss, t2t_acc, text_in, text_in_len, text_out, text_out_len = result
+                    else:
+                        loss, t2t_acc, htpad, htlen = result
                     if NO_AVG:
                         pass
                     else:
@@ -369,8 +449,21 @@ class CustomUpdater(training.StandardUpdater):
                 logging.info("loss_data_sum: %f", loss_data_sum)
 
             if use_mmd:
-                loss = packed_mmd(hspad, hslen, htpad, htlen)
-                chainer.reporter.report({'t/mmd_loss': loss.item() })
+                if self.args.use_inout_mmd:
+                    logging.warning((speech_in.shape, speech_out.shape, speech_in_len, speech_out_len))
+                    speech_loss = packed_mmd(speech_in, speech_in_len, speech_out, speech_out_len)
+                    chainer.reporter.report({'t/ps_mmd': speech_loss.item() })
+                    text_loss = packed_mmd(text_in, text_in_len, text_out, text_out_len)
+                    chainer.reporter.report({'t/pt_mmd': text_loss.item() })
+                    loss = (speech_loss + text_loss) / 2.0
+                    chainer.reporter.report({'t/p_mmd': loss.item() })
+                else:
+                    if self.args.inter_domain_loss == "kl":
+                        loss_fun = packed_gauss_kld
+                    else:
+                        loss_fun = packed_mmd
+                    loss = loss_fun(hspad, hslen, htpad, htlen)
+                    chainer.reporter.report({'t/mmd_loss': loss.item() })
                 self.gradient_decent(loss, self.opts["mmd"], freeze_att=FREEZE_ATT)
                 loss_data = (loss_data_sum + loss.item()) / 5.0
             elif ALL_MODE:
@@ -382,26 +475,41 @@ class CustomUpdater(training.StandardUpdater):
             chainer.reporter.report({'t/loss': loss_data})
         elif data[0][1]['utt2mode'] == 'a':
             logging.info("audio only mode")
-            s2s_loss = self.model.ae_speech(data)
-            loss = s2s_loss
+            result = self.model.ae_speech(data, return_hidden=True, return_inout=self.args.use_inout_mmd)
+            if self.args.use_inout_mmd:
+                s2s_loss, speech_in, speech_in_len, speech_out, speech_out_len = result
+                speech_loss = packed_mmd(speech_in, speech_in_len, speech_out, speech_out_len)
+                chainer.reporter.report({'t/us_mmd': speech_loss.item() })
+                loss = (s2s_loss + speech_loss) / 2.0
+            else:
+                s2s_loss, hspad, hslen = result
+                loss = s2s_loss
             self.gradient_decent(loss, self.opts['s2s'], freeze_att=FREEZE_ATT)
 
-            loss_data = loss.item()
+            loss_data = s2s_loss.item()
             logging.info("loss: %f", loss_data)
-            chainer.reporter.report({'t/loss': loss_data})
             chainer.reporter.report({'t/s2s_loss': loss_data})
         elif data[0][1]['utt2mode'] == 't':
             logging.info("text only mode")
-            t2t_loss, t2t_acc = self.model.ae_text(data)
+            # t2t_loss, t2t_acc = self.model.ae_text(data)
+            result = self.model.ae_text(data, return_hidden=True, return_inout=self.args.use_inout_mmd)
+            if self.args.use_inout_mmd:
+                t2t_loss, t2t_acc, text_in, text_in_len, text_out, text_out_len = result
+                text_loss = packed_mmd(text_in, text_in_len, text_out, text_out_len)
+                chainer.reporter.report({'t/ut_mmd': text_loss.item() })
+                loss = (t2t_loss + text_loss) / 2.0
+            else:
+                t2t_loss, t2t_acc, htpad, htlen = result
+                loss = t2t_loss
+
             if NO_AVG:
                 loss = t2t_loss
             else:
                 loss = t2t_loss / avg_textlen
             self.gradient_decent(loss, self.opts['t2t'], freeze_att=FREEZE_ATT)
 
-            loss_data = loss.item()
+            loss_data = t2t_loss.item()
             logging.info("loss: %f", loss_data)
-            chainer.reporter.report({'t/loss': loss_data})
             chainer.reporter.report({'t/t2t_loss': loss_data})
             chainer.reporter.report({'t/t2t_acc': t2t_acc})
         else:
@@ -448,19 +556,20 @@ def extract_json(json, mode):
     return all_utt
 
 
-def make_batchset_asrtts(data, batch_size, max_length_in, max_length_out, num_batches=0, factor_audio=1, factor_text=4):
+def make_batchset_asrtts(data, batch_size, max_length_in, max_length_out, num_batches=0, factor_audio=1, factor_text=4,
+                         half_unpair=False):
 
     data_audio_only = extract_json(data, 'a')
     data_text_only = extract_json(data, 't')
     data_parallel = extract_json(data, 'p')
-
+    unpair_batch_size = batch_size / 2 if half_unpair else batch_size
     if len(data_audio_only) > 0:
-        json_audio_only = make_batchset(data_audio_only, factor_audio * batch_size,
+        json_audio_only = make_batchset(data_audio_only, factor_audio * unpair_batch_size,
                                         max_length_in, max_length_out, num_batches)
     else:
         json_audio_only = []
     if len(data_text_only) > 0:
-        json_text_only = make_batchset(data_text_only, factor_text * batch_size,
+        json_text_only = make_batchset(data_text_only, factor_text * unpair_batch_size,
                                        max_length_in, max_length_out, num_batches)
     else:
         json_text_only = []
@@ -470,7 +579,8 @@ def make_batchset_asrtts(data, batch_size, max_length_in, max_length_out, num_ba
     else:
         json_parallel = []
 
-    return json_audio_only + json_text_only + json_parallel
+    json_all = json_audio_only + json_text_only + json_parallel
+    return json_all, dict(speech=json_audio_only, text=json_text_only, pair=json_parallel)
 
 
 def setup_tts_loss(odim_asr, idim_tts, args):
@@ -630,12 +740,14 @@ def train(args):
         setattr(opts[key], "serialize", lambda s: dummy_target.serialize(s))
 
     # read json data
+    logging.warning("reading json")
     with open(args.train_json, 'rb') as f:
         train_json = json.load(f)['utts']
     with open(args.valid_json, 'rb') as f:
         valid_json = json.load(f)['utts']
 
     # read utt2mode scp
+    logging.warning("reading utt2mode")
     def load_utt2mode(scp, utts):
         with open(scp, 'r') as f:
             for line in f:
@@ -647,18 +759,19 @@ def train(args):
 
 
     # make minibatch list (variable length)
-    train = make_batchset_asrtts(train_json, args.batch_size,
-                                 args.maxlen_in, args.maxlen_out, args.minibatches)
-    valid = make_batchset_asrtts(valid_json, args.batch_size,
+    train, train_multi = make_batchset_asrtts(train_json, args.batch_size,
+                                              args.maxlen_in, args.maxlen_out, args.minibatches,
+                                              half_unpair=args.use_mmd_autoencoding)
+    valid, valid_multi = make_batchset_asrtts(valid_json, args.batch_size,
                                  args.maxlen_in, args.maxlen_out, args.minibatches)
     # hack to make batchsze argument as 1
     # actual bathsize is included in a list
-    train_iter = chainer.iterators.SerialIterator(train, 1)
+    train_iter = chainer.iterators.SerialIterator(train_multi["pair"], 1)
     valid_iter = chainer.iterators.SerialIterator(
         valid, 1, repeat=False, shuffle=False)
 
     # Set up a trainer
-    updater = CustomUpdater(model, args.grad_clip, train_iter, opts,
+    updater = CustomUpdater(model, args.grad_clip, train_iter, train_multi, opts,
                             converter=converter_kaldi, device=gpu_id, args=args)
     trainer = training.Trainer(
         updater, (args.epochs, 'epoch'), out=args.outdir)
@@ -708,7 +821,7 @@ def train(args):
 
     # Make a plot for training and validation values
     # report keys
-    report_keys = ['t/loss', 't/tts_loss', 't/s2s_loss', 't/asr_loss', 't/t2t_loss', 't/mmd_loss',
+    report_keys = ['t/loss', 't/tts_loss', 't/s2s_loss', 't/asr_loss', 't/t2t_loss', 't/mmd_loss', 't/ae_mmd_loss',
                    'd/loss', 'd/tts_loss', 'd/s2s_loss', 'd/asr_loss', 'd/t2t_loss']
     trainer.extend(extensions.PlotReport(report_keys,
                                          'epoch', file_name='loss.png'))
@@ -736,7 +849,7 @@ def train(args):
 
     # Write a log of evaluation statistics for each epoch
     trainer.extend(extensions.LogReport(trigger=(REPORT_INTERVAL, 'iteration')))
-    report_keys = ['t/loss', 't/tts_loss', 't/s2s_loss', 't/asr_loss', 't/t2t_loss', 't/asr_acc', 't/t2t_acc', 't/mmd_loss',
+    report_keys = ['t/loss', 't/tts_loss', 't/s2s_loss', 't/asr_loss', 't/t2t_loss', 't/asr_acc', 't/t2t_acc', 't/mmd_loss', 't/ae_mmd_loss',
                    'd/loss', 'd/tts_loss', 'd/s2s_loss', 'd/asr_loss', 'd/t2t_loss', 'd/asr_acc', 'd/t2t_acc']
     report_keys.append('epoch')
     report_keys.append('iteration')
@@ -747,226 +860,3 @@ def train(args):
 
     # Run the training
     trainer.run()
-
-
-def recog(args):
-    '''Run recognition'''
-
-    # rnnlm
-    import extlm_pytorch
-    import lm_pytorch
-
-    # seed setting
-    torch.manual_seed(args.seed)
-
-    # read training config
-    with open(args.model_conf, "rb") as f:
-        logging.info('reading a model config file from' + args.model_conf)
-        idim_asr, odim_asr, train_args = pickle.load(f)
-
-    for key in sorted(vars(args).keys()):
-        logging.info('ARGS: ' + key + ': ' + str(vars(args)[key]))
-
-    # specify model architecture
-    logging.info('reading model parameters from' + args.model)
-    e2e_asr = E2E(idim_asr, odim_asr, train_args)
-    logging.info(e2e_asr)
-    asr_loss = Loss(e2e_asr, train_args.mtlalpha)
-
-    # specify model architecture for TTS
-    # reverse input and output dimension
-    tts_loss = setup_tts_loss(odim_asr, idim_asr - 3, train_args)
-    logging.info(tts_loss)
-
-    # define loss
-    model = ASRTTSLoss(asr_loss, tts_loss, train_args)
-
-    def cpu_loader(storage, location):
-        return storage
-
-    def remove_dataparallel(state_dict):
-        from collections import OrderedDict
-        new_state_dict = OrderedDict()
-        for k, v in state_dict.items():
-            if k.startswith("module."):
-                k = k[7:]
-            new_state_dict[k] = v
-        return new_state_dict
-
-    model.load_state_dict(remove_dataparallel(torch.load(args.model, map_location=cpu_loader)))
-
-    # read rnnlm
-    if args.rnnlm:
-        rnnlm = lm_pytorch.ClassifierWithState(
-            lm_pytorch.RNNLM(len(train_args.char_list), 650))
-        rnnlm.load_state_dict(torch.load(args.rnnlm, map_location=cpu_loader))
-        rnnlm.eval()
-    else:
-        rnnlm = None
-
-    if args.word_rnnlm:
-        if not args.word_dict:
-            logging.error('word dictionary file is not specified for the word RNNLM.')
-            sys.exit(1)
-
-        word_dict = load_labeldict(args.word_dict)
-        char_dict = {x: i for i, x in enumerate(train_args.char_list)}
-        word_rnnlm = lm_pytorch.ClassifierWithState(lm_pytorch.RNNLM(len(word_dict), 650))
-        word_rnnlm.load_state_dict(torch.load(args.word_rnnlm, map_location=cpu_loader))
-        word_rnnlm.eval()
-
-        if rnnlm is not None:
-            rnnlm = lm_pytorch.ClassifierWithState(
-                extlm_pytorch.MultiLevelLM(word_rnnlm.predictor,
-                                           rnnlm.predictor, word_dict, char_dict))
-        else:
-            rnnlm = lm_pytorch.ClassifierWithState(
-                extlm_pytorch.LookAheadWordLM(word_rnnlm.predictor,
-                                              word_dict, char_dict))
-
-    # read json data
-    with open(args.recog_json, 'rb') as f:
-        recog_json = json.load(f)['utts']
-
-    new_json = {}
-    for name in recog_json.keys():
-        feat = kaldi_io_py.read_mat(recog_json[name]['input'][0]['feat'])
-        nbest_hyps = e2e_asr.recognize(feat, args, train_args.char_list, rnnlm=rnnlm)
-        # get 1best and remove sos
-        y_hat = nbest_hyps[0]['yseq'][1:]
-        y_true = map(int, recog_json[name]['output'][0]['tokenid'].split())
-
-        # print out decoding result
-        seq_hat = [train_args.char_list[int(idx)] for idx in y_hat]
-        seq_true = [train_args.char_list[int(idx)] for idx in y_true]
-        seq_hat_text = "".join(seq_hat).replace('<space>', ' ')
-        seq_true_text = "".join(seq_true).replace('<space>', ' ')
-        logging.info("groundtruth[%s]: " + seq_true_text, name)
-        logging.info("prediction [%s]: " + seq_hat_text, name)
-
-        # copy old json info
-        new_json[name] = dict()
-        new_json[name]['utt2spk'] = recog_json[name]['utt2spk']
-
-        # added recognition results to json
-        logging.debug("dump token id")
-        out_dic = dict()
-        for _key in recog_json[name]['output'][0]:
-            out_dic[_key] = recog_json[name]['output'][0][_key]
-
-        # TODO(karita) make consistent to chainer as idx[0] not idx
-        out_dic['rec_tokenid'] = " ".join([str(idx) for idx in y_hat])
-        logging.debug("dump token")
-        out_dic['rec_token'] = " ".join(seq_hat)
-        logging.debug("dump text")
-        out_dic['rec_text'] = seq_hat_text
-
-        new_json[name]['output'] = [out_dic]
-        # TODO(nelson): Modify this part when saving more than 1 hyp is enabled
-        # add n-best recognition results with scores
-        if args.beam_size > 1 and len(nbest_hyps) > 1:
-            for i, hyp in enumerate(nbest_hyps):
-                y_hat = hyp['yseq'][1:]
-                seq_hat = [train_args.char_list[int(idx)] for idx in y_hat]
-                seq_hat_text = "".join(seq_hat).replace('<space>', ' ')
-                new_json[name]['rec_tokenid' + '[' + '{:05d}'.format(i) + ']'] = " ".join([str(idx) for idx in y_hat])
-                new_json[name]['rec_token' + '[' + '{:05d}'.format(i) + ']'] = " ".join(seq_hat)
-                new_json[name]['rec_text' + '[' + '{:05d}'.format(i) + ']'] = seq_hat_text
-                new_json[name]['score' + '[' + '{:05d}'.format(i) + ']'] = hyp['score']
-
-    # TODO(watanabe) fix character coding problems when saving it
-    with open(args.result_label, 'wb') as f:
-        f.write(json.dumps({'utts': new_json}, indent=4, sort_keys=True).encode('utf_8'))
-
-
-def tts_decode(args):
-    '''RUN DECODING'''
-    # read training config
-    # idim, odim, train_args = get_model_conf(args.model, args.model_conf)
-    # seed setting
-    torch.manual_seed(args.seed)
-
-    # show argments
-    for key in sorted(vars(args).keys()):
-        logging.info('ARGS: ' + key + ': ' + str(vars(args)[key]))
-
-    # read training config
-    with open(args.model_conf, "rb") as f:
-        logging.info('reading a model config file from' + args.model_conf)
-        idim_asr, odim_asr, train_args = pickle.load(f)
-
-    for key in sorted(vars(args).keys()):
-        logging.info('ARGS: ' + key + ': ' + str(vars(args)[key]))
-
-    # specify model architecture
-    logging.info('reading model parameters from' + args.model)
-    e2e_asr = E2E(idim_asr, odim_asr, train_args)
-    logging.info(e2e_asr)
-    asr_loss = Loss(e2e_asr, train_args.mtlalpha)
-
-    # specify model architecture for TTS
-    # reverse input and output dimension
-    tts_loss = setup_tts_loss(odim_asr, idim_asr - 3, train_args)
-    logging.info(tts_loss)
-
-    # define loss
-    model = ASRTTSLoss(asr_loss, tts_loss, train_args)
-
-    def cpu_loader(storage, location):
-        return storage
-
-    def remove_dataparallel(state_dict):
-        from collections import OrderedDict
-        new_state_dict = OrderedDict()
-        for k, v in state_dict.items():
-            if k.startswith("module."):
-                k = k[7:]
-            new_state_dict[k] = v
-        return new_state_dict
-
-    model.load_state_dict(remove_dataparallel(torch.load(args.model, map_location=cpu_loader)))
-
-    # define model
-    tacotron2 = Tacotron2(idim, odim, train_args)
-    eos = str(tacotron2.idim - 1)
-
-    # load trained model parameters
-    logging.info('reading model parameters from ' + args.model)
-    torch_load(args.model, tacotron2)
-    tacotron2.eval()
-
-    # set torch device
-    device = torch.device("cuda" if args.ngpu > 0 else "cpu")
-    tacotron2 = tacotron2.to(device)
-
-    # read json data
-    with open(args.json, 'rb') as f:
-        js = json.load(f)['utts']
-
-    # chech direcitory
-    outdir = os.path.dirname(args.out)
-    if len(outdir) != 0 and not os.path.exists(outdir):
-        os.makedirs(outdir)
-
-    # write to ark and scp file (see https://github.com/vesis84/kaldi-io-for-python)
-    arkscp = 'ark:| copy-feats --print-args=false ark:- ark,scp:%s.ark,%s.scp' % (args.out, args.out)
-    with torch.no_grad(), kaldi_io_py.open_or_fd(arkscp, 'wb') as f:
-        for idx, utt_id in enumerate(js.keys()):
-            x = js[utt_id]['output'][0]['tokenid'].split() + [eos]
-            x = np.fromiter(map(int, x), dtype=np.int64)
-            x = torch.LongTensor(x).to(device)
-
-            # get speaker embedding
-            if train_args.use_speaker_embedding:
-                spemb = kaldi_io_py.read_vec_flt(js[utt_id]['input'][1]['feat'])
-                spemb = torch.FloatTensor(spemb).to(device)
-            else:
-                spemb = None
-
-            # decode and write
-            outs, _, _ = tacotron2.inference(x, args, spemb)
-            if outs.size(0) == x.size(0) * args.maxlenratio:
-                logging.warn("output length reaches maximum length (%s)." % utt_id)
-            logging.info('(%d/%d) %s (size:%d->%d)' % (
-                idx + 1, len(js.keys()), utt_id, x.size(0), outs.size(0)))
-            kaldi_io_py.write_mat(f, outs.cpu().numpy(), utt_id)

@@ -24,35 +24,6 @@ from asrtts_utils import pad_ndarray_list
 torch_is_old = torch.__version__.startswith("0.3.")
 
 
-def mmd_loss(xs,ys,beta=1.0):
-    Nx = xs.shape[0]
-    Ny = ys.shape[0]
-    Kxy = torch.matmul(xs,ys.t())
-    dia1 = torch.sum(xs*xs,1)
-    dia2 = torch.sum(ys*ys,1)
-    Kxy = Kxy-0.5*dia1.unsqueeze(1).expand(Nx,Ny)
-    Kxy = Kxy-0.5*dia2.expand(Nx,Ny)
-    Kxy = torch.exp(beta*Kxy).sum()/Nx/Ny
-
-    Kx = torch.matmul(xs,xs.t())
-    Kx = Kx-0.5*dia1.unsqueeze(1).expand(Nx,Nx)
-    Kx = Kx-0.5*dia1.expand(Nx,Nx)
-    Kx = torch.exp(beta*Kx).sum()/Nx/Nx
-
-    Ky = torch.matmul(ys,ys.t())
-    Ky = Ky-0.5*dia2.unsqueeze(1).expand(Ny,Ny)
-    Ky = Ky-0.5*dia2.expand(Ny,Ny)
-    Ky = torch.exp(beta*Ky).sum()/Ny/Ny
-    return Kx+Ky-2*Kxy
-
-
-def packed_mmd(hspad, hslens, htpad, htlens):
-    from torch.nn.utils.rnn import pack_padded_sequence
-    hspack = pack_padded_sequence(hspad, hslens, batch_first=True)
-    htpack = pack_padded_sequence(htpad, htlens, batch_first=True)
-    return mmd_loss(hspack.data, htpack.data)
-
-
 class ASRTTSLoss(torch.nn.Module):
     def __init__(self, asr_loss, tts_loss, args, return_targets=True):
         super(ASRTTSLoss, self).__init__()
@@ -192,20 +163,20 @@ class AutoEncoderSpeech(torch.nn.Module):
         self.return_targets = return_targets
         self.use_speaker_embedding = use_speaker_embedding
 
-    def forward(self, data, return_hidden=False):
+    def forward(self, data, return_hidden=False, return_inout=False):
         asr_texts, asr_feats, asr_featlens = get_asr_data(self, data, 'feat')
         tts_texts, tts_textlens, tts_feats, tts_labels, tts_featlens, spembs = \
             get_tts_data(self, data, 'feat', self.use_speaker_embedding)
 
         # encoder
-        hpad_pre_spk, hlens = self.asr_enc(asr_feats, asr_featlens)
+        hpad_pre_spk, hlens, feat_input, feat_len = self.asr_enc(asr_feats, asr_featlens, True)
         if self.use_speaker_embedding is not None:
             spembs = F.normalize(spembs).unsqueeze(1).expand(-1, hpad_pre_spk.size(1), -1)
             hpad = torch.cat([hpad_pre_spk, spembs], dim=-1)
         else:
             hpad = hpad_pre_spk
 
-        after_outs, before_outs, logits, att_ws = self.tts_dec(hpad, hlens.tolist(), tts_feats)
+        after_outs, before_outs_, logits, att_ws = self.tts_dec(hpad, hlens.tolist(), tts_feats)
         # copied from e2e_tts_th.py
         if self.use_masking and tts_featlens is not None:
             # weight positive samples
@@ -221,7 +192,7 @@ class AutoEncoderSpeech(torch.nn.Module):
             mask = to_cuda(self, make_mask(tts_featlens, tts_feats.size(2)))
             feats = tts_feats.masked_select(mask)
             after_outs = after_outs.masked_select(mask)
-            before_outs = before_outs.masked_select(mask)
+            before_outs = before_outs_.masked_select(mask)
             labels = tts_labels.masked_select(mask[:, :, 0])
             logits = logits.masked_select(mask[:, :, 0])
             weights = weights.masked_select(mask[:, :, 0]) if weights is not None else None
@@ -244,7 +215,8 @@ class AutoEncoderSpeech(torch.nn.Module):
         mse_loss_data = mse_loss.data[0] if torch_is_old else mse_loss.item()
         logging.debug("loss = %.3e (bce: %.3e, l1: %.3e, mse: %.3e)" % (
             loss_data, bce_loss_data, l1_loss_data, mse_loss_data))
-
+        if return_inout:
+            return loss, feat_input, feat_len, before_outs_, tts_featlens
         if return_hidden:
             return loss, hpad_pre_spk, hlens
         return loss
@@ -259,19 +231,21 @@ class AutoEncoderText(torch.nn.Module):
         self.return_targets = return_targets
         self.use_speaker_embedding = use_speaker_embedding
 
-    def forward(self, data, return_hidden=False):
+    def forward(self, data, return_hidden=False, return_inout=False):
         asr_texts, asr_feats, asr_featlens = get_asr_data(self, data, 'text')
         tts_texts, tts_textlens, tts_feats, tts_labels, tts_featlens, spembs = \
             get_tts_data(self, data, 'text', self.use_speaker_embedding)
-        
+
         if isinstance(tts_textlens, torch.Tensor) or isinstance(tts_textlens, np.ndarray):
             tts_textlens = list(map(int, tts_textlens))
 
-        hpad, hlens = self.tts_enc(tts_texts, tts_textlens)
+        hpad, hlens, inp, inp_len = self.tts_enc(tts_texts, tts_textlens, True)
 
         # NOTE asr_texts and tts_texts would be different due to the <eos> treatment
-        loss, acc = self.asr_dec(hpad, hlens, asr_texts)
+        loss, acc, out = self.asr_dec(hpad, hlens, asr_texts, True)
 
+        if return_inout:
+            return loss, acc, inp, inp_len, out, tts_textlens
         if return_hidden:
             return loss, acc, hpad, hlens
         return loss, acc

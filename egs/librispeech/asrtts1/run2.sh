@@ -298,17 +298,20 @@ if [ ${stage} -le 3 ]; then
 	# 				                          $nnet_dir/xvectors_${task} &
     # done
     # wait
-    # Update json
-    for task in ${train_set} ${train_dev} ${recog_set}; do
-	    local/update_json.sh ${dumpdir}/${task}/delta${do_delta}/data.json ${nnet_dir}/xvectors_${task}/xvector.scp
-    done
+    # # Update json
+    # for task in ${train_set} ${train_dev} ${recog_set}; do
+	#     local/update_json.sh ${dumpdir}/${task}/delta${do_delta}/data.json ${nnet_dir}/xvectors_${task}/xvector.scp
+    # done
     # Finally remove long utterances
     # Also prepare only parallel data
     for task in ${train_set} ${train_dev}; do
 	    feat_dir=${dumpdir}/${task}/delta${do_delta}
 	    python2 local/remove_longshort_utt.py \
-	           --max-input 1500 --max-output 300 \
-	           ${feat_dir}/data.json > ${feat_dir}/data_short.json
+	            --max-input 3000 --max-output 400 \
+	            ${feat_dir}/data.json > ${feat_dir}/data_short_3000.json
+	    # python2 local/remove_longshort_utt.py \
+	    #        --max-input 1500 --max-output 300 \
+	    #        ${feat_dir}/data.json > ${feat_dir}/data_short.json
 	    # python2 local/prune_json.py ${feat_dir}/data_short.json > ${feat_dir}/data_short_p.json
     done
 fi

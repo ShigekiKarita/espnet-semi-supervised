@@ -105,10 +105,15 @@ lm_weight=0.3
 # decoding parameter
 beam_size=20
 penalty=0.0
-maxlenratio=0.8
-minlenratio=0.3
+#maxlenratio=0.8
+#minlenratio=0.3
 ctc_weight=0.0
 recog_model=loss.best # set a model to be used for decoding: 'acc.best' or 'loss.best'
+
+threshold=0.5    # threshold to stop the generation
+maxlenratio=10.0 # maximum length of generated samples = input length * maxlenratio
+minlenratio=0.0  # minimum length of generated samples = input length * minlenratio
+eval_set=test_clean
 
 # Set this to somewhere where you want to put your data, or where
 # someone else has already put it.  You'll want to change this
@@ -434,8 +439,12 @@ if [ ${stage} -le 5 ];then
     echo "stage 5: Decoding"
     for sets in ${train_dev} ${eval_set};do
         [ ! -e  ${outdir}/${sets} ] && mkdir -p ${outdir}/${sets}
-        cp ${dumpdir}/${sets}/data.json ${outdir}/${sets}
-        splitjson.py --parts ${nj} ${outdir}/${sets}/data.json
+        cp ${dumpdir}/${sets}_tts/delta${do_delta}/data.json ${outdir}/${sets}
+        # split data
+        if [ ! -e ${outdir}/${sets}/split${nj}utt/data.1.json ]; then
+            splitjson.py --parts ${nj} ${outdir}/${sets}/data.json
+        fi
+
         # decode in parallel
         ${train_cmd} JOB=1:$nj ${outdir}/${sets}/log/decode.JOB.log \
             tts_decode.py \
@@ -444,7 +453,7 @@ if [ ${stage} -le 5 ];then
                 --verbose ${verbose} \
                 --out ${outdir}/${sets}/feats.JOB \
                 --json ${outdir}/${sets}/split${nj}utt/data.JOB.json \
-                --model ${expdir}/results/${model} \
+                --model ${expdir}/results/model.loss.best \
                 --threshold ${threshold} \
                 --maxlenratio ${maxlenratio} \
                 --minlenratio ${minlenratio}
@@ -457,9 +466,9 @@ fi
 
 if [ ${stage} -le 6 ];then
     echo "stage 6: Synthesis"
-    for sets in ${train_dev} ${eval_set};do
+    for sets in ${train_dev}; do # ${eval_set};do
         [ ! -e ${outdir}_denorm/${sets} ] && mkdir -p ${outdir}_denorm/${sets}
-        apply-cmvn --norm-vars=true --reverse=true data/${train_set}/cmvn.ark \
+        apply-cmvn --norm-vars=true --reverse=true data/${train_set}_tts/cmvn.ark \
             scp:${outdir}/${sets}/feats.scp \
             ark,scp:${outdir}_denorm/${sets}/feats.ark,${outdir}_denorm/${sets}/feats.scp
         convert_fbank.sh --nj ${nj} --cmd "${train_cmd}" \

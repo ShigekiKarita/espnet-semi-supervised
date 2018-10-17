@@ -31,7 +31,7 @@ win_length=""  # number of samples in analysis window
 
 # ASR network archtecture
 # encoder related
-etype=vggblstmp   # encoder architecture type
+etype=blstmp   # encoder architecture type
 elayers=4
 eunits=320
 eprojs=512 # ASR default 320
@@ -92,7 +92,7 @@ opt=Adam
 lr=1e-3
 eps=1e-6
 weight_decay=0.0
-epochs=15
+epochs=30
 asr_weight=0.1
 tts_weight=1.0
 s2s_weight=0.01
@@ -105,10 +105,15 @@ lm_weight=0.3
 # decoding parameter
 beam_size=20
 penalty=0.0
-maxlenratio=0.8
-minlenratio=0.3
+#maxlenratio=0.8
+#minlenratio=0.3
 ctc_weight=0.0
 recog_model=loss.best # set a model to be used for decoding: 'acc.best' or 'loss.best'
+
+threshold=0.5    # threshold to stop the generation
+maxlenratio=10.0 # maximum length of generated samples = input length * maxlenratio
+minlenratio=0.0  # minimum length of generated samples = input length * minlenratio
+eval_set=test_clean
 
 # Set this to somewhere where you want to put your data, or where
 # someone else has already put it.  You'll want to change this
@@ -120,7 +125,7 @@ datadir=/data/rigel1/corpora/LibriSpeech
 model_asr=
 model_tts=
 model=
-
+model_exp_dir=
 # base url for downloads.
 data_url=www.openslr.org/resources/12
 
@@ -128,7 +133,7 @@ data_url=www.openslr.org/resources/12
 tag="" # tag for managing experiments.
 
 data_type=data_short # data or data_short or data_short_p
-recog_set="test_clean test_other dev_clean dev_other"
+
 . utils/parse_options.sh || exit 1;
 
 . ./path.sh
@@ -152,8 +157,8 @@ set -u
 set -o pipefail
 
 train_set=train_clean_100
-train_dev=dev_clean
-
+train_dev=dev # _clean
+recog_set="test_clean test_other dev_clean dev_other"
 
 if [ ${stage} -le -1 ]; then
     echo "stage -1: Data Download"
@@ -200,114 +205,112 @@ if [ ${stage} -le 1 ]; then
     # done
 
     for mode in asr tts; do
-	# utils/combine_data.sh data/${train_set}_${mode} data/train_clean_100_${mode} data/train_clean_360_${mode} data/train_other_500_${mode}
-	# utils/combine_data.sh data/${train_dev}_${mode} data/dev_clean_${mode} data/dev_other_${mode}
+	    # utils/combine_data.sh data/${train_set}_${mode} data/train_clean_100_${mode} data/train_clean_360_${mode} data/train_other_500_${mode}
+	    # utils/combine_data.sh data/${train_dev}_${mode} data/dev_clean_${mode} data/dev_other_${mode}
 
-	# # compute global CMVN
-	# # make sure that we only use the pair data for global normalization
-	# compute-cmvn-stats scp:data/train_clean_100_${mode}/feats.scp data/train_clean_100_${mode}/cmvn.ark
+	    # # compute global CMVN
+	    # # make sure that we only use the pair data for global normalization
+	    # compute-cmvn-stats scp:data/train_clean_100_${mode}/feats.scp data/train_clean_100_${mode}/cmvn.ark
 
-	# dump features for training
-	for task in ${train_dev}; do  # ${train_set}
-	    feat_dir=${dumpdir}/${task}_${mode}/delta${do_delta}; mkdir -p ${feat_dir}
-	    dump.sh --cmd "$train_cmd" --nj ${nj} --do_delta ${do_delta} \
-		    data/${task}_${mode}/feats.scp data/train_clean_100_${mode}/cmvn.ark exp/dump_feats/${task}_${mode} ${feat_dir}
-	done
+	    # dump features for training
+	    for task in ${train_dev}; do  # ${train_set}
+	        feat_dir=${dumpdir}/${task}_${mode}/delta${do_delta}; mkdir -p ${feat_dir}
+	        dump.sh --cmd "$train_cmd" --nj ${nj} --do_delta ${do_delta} \
+		            data/${task}_${mode}/feats.scp data/train_clean_100_${mode}/cmvn.ark exp/dump_feats/${task}_${mode} ${feat_dir}
+	    done
     done
 fi
 
 dict=data/lang_1char/train_clean_100_units.txt
 echo "dictionary: ${dict}"
 if [ ${stage} -le 2 ]; then
-#     ### Task dependent. You have to check non-linguistic symbols used in the corpus.
-#     echo "stage 2: Dictionary and Json Data Preparation"
-#     mkdir -p data/lang_1char/
-#     echo "<unk> 1" > ${dict} # <unk> must be 1, 0 will be used for "blank" in CTC
-#     text2token.py -s 1 -n 1 data/train_clean_100_asr/text | cut -f 2- -d" " | tr " " "\n" \
-#     | sort | uniq | grep -v -e '^\s*$' | awk '{print $0 " " NR+1}' >> ${dict}
-#     wc -l ${dict}
+    ### Task dependent. You have to check non-linguistic symbols used in the corpus.
+    echo "stage 2: Dictionary and Json Data Preparation"
+    # mkdir -p data/lang_1char/
+    # echo "<unk> 1" > ${dict} # <unk> must be 1, 0 will be used for "blank" in CTC
+    # text2token.py -s 1 -n 1 data/train_clean_100_asr/text | cut -f 2- -d" " | tr " " "\n" \
+    # | sort | uniq | grep -v -e '^\s*$' | awk '{print $0 " " NR+1}' >> ${dict}
+    # wc -l ${dict}
 
-#     # add mode
-#     # train_clean_100 for pair data, train_clean_360 for audio only, train_other_500 and/or train_clean_360
-     for mode in asr tts; do
-# 	awk '{print $1 " p"}' data/train_clean_100_${mode}/utt2spk >  data/${train_set}_${mode}/utt2mode.scp
-# 	awk '{print $1 " a"}' data/train_clean_360_${mode}/utt2spk >> data/${train_set}_${mode}/utt2mode.scp
-# 	awk '{print $1 " t"}' data/train_other_500_${mode}/utt2spk >> data/${train_set}_${mode}/utt2mode.scp
-# 	# dev set has pair data
-# 	awk '{print $1 " p"}' data/${train_dev}_${mode}/utt2spk > data/${train_dev}_${mode}/utt2mode.scp
-    
-	# make json labels
-	for task in ${train_set} ${train_dev}; do
-	    feat_dir=${dumpdir}/${task}_${mode}/delta${do_delta}
-        # --scps data/${task}_${mode}/utt2mode.scp \
-	    data2json.sh --feat ${feat_dir}/feats.scp \
-			 data/${task}_${mode} ${dict} > ${feat_dir}/data.json
-	done
-	# for task in ${recog_set}; do
-	#     feat_dir=${dumpdir}/${task}_${mode}/delta${do_delta}
-    #         data2json.sh --feat ${feat_dir}/feats.scp \
-	# 		 data/${task}_${mode} ${dict} > ${feat_dir}/data.json
-	# done
+    # add mode
+    train_clean_100 for pair data, train_clean_360 for audio only, train_other_500 and/or train_clean_360
+    for mode in asr tts; do
+	    # awk '{print $1 " p"}' data/train_clean_100_${mode}/utt2spk >  data/${train_set}_${mode}/utt2mode.scp
+	    # awk '{print $1 " a"}' data/train_clean_360_${mode}/utt2spk >> data/${train_set}_${mode}/utt2mode.scp
+	    # awk '{print $1 " t"}' data/train_other_500_${mode}/utt2spk >> data/${train_set}_${mode}/utt2mode.scp
+	    # # dev set has pair data
+	    # awk '{print $1 " p"}' data/${train_dev}_${mode}/utt2spk > data/${train_dev}_${mode}/utt2mode.scp
+
+	    # make json labels
+	    for task in ${train_set} ${train_dev}; do
+	        feat_dir=${dumpdir}/${task}_${mode}/delta${do_delta}
+
+	        data2json.sh --feat ${feat_dir}/feats.scp \
+			             data/${task}_${mode} ${dict} > ${feat_dir}/data.json
+	    done
+	    for task in ${recog_set}; do
+	        feat_dir=${dumpdir}/${task}_${mode}/delta${do_delta}
+            data2json.sh --feat ${feat_dir}/feats.scp \
+			             data/${task}_${mode} ${dict} > ${feat_dir}/data.json
+	    done
     done
-    # # combine asr and tts jsons as multiple input and output
-    # for task in ${train_set} ${train_dev} ; do
-	#     feat_dir=${dumpdir}/${task}/delta${do_delta}; mkdir -p ${feat_dir}
-	#     local/multi_jsons.py ${dumpdir}/${task}_asr/delta${do_delta}/data.json ${dumpdir}/${task}_tts/delta${do_delta}/data.json \
-	# 		     > ${feat_dir}/data.json
-    # done
+    # combine asr and tts jsons as multiple input and output
+    for task in ${train_set} ${train_dev} ; do
+	    feat_dir=${dumpdir}/${task}/delta${do_delta}; mkdir -p ${feat_dir}
+	    local/multi_jsons.py ${dumpdir}/${task}_asr/delta${do_delta}/data.json ${dumpdir}/${task}_tts/delta${do_delta}/data.json \
+			     > ${feat_dir}/data.json
+    done
 fi
 
 if [ ${stage} -le 3 ]; then
 #     echo "stage 3: x-vector extraction"
 #     # Make MFCCs and compute the energy-based VAD for each dataset
-#     mfccdir=mfcc
-#     vaddir=mfcc
-#     nnet_dir=exp/xvector_nnet_1a
-#     # for task in ${train_set} ${train_dev} ${recog_set}; do
-#     #     (
-# 	#         utils/copy_data_dir.sh data/${task}_asr data/${task}_mfcc
-# 	#         steps/make_mfcc.sh \
-# 	#             --write-utt2num-frames true \
-# 	#             --mfcc-config conf/mfcc.conf \
-# 	#             --nj ${nj} --cmd "$train_cmd" \
-# 	#             data/${task}_mfcc exp/make_mfcc $mfccdir
-# 	#         utils/fix_data_dir.sh data/${task}_mfcc
-# 	#         sid/compute_vad_decision.sh --nj ${nj} --cmd "$train_cmd" \
-# 	# 			                        data/${task}_mfcc exp/make_vad ${vaddir}
-# 	#         utils/fix_data_dir.sh data/${task}_mfcc
-#     #     )
-#     # done
-#     # wait
-#     # # Check pretrained model existence
-#     # # nnet_dir=$PWD/../tts1/
-#     # if [ ! -e $nnet_dir ];then
-# 	#     echo "X-vector model does not exist. Download pre-trained model."
-# 	#     wget http://kaldi-asr.org/models/8/0008_sitw_v2_1a.tar.gz
-# 	#     tar xvf 0008_sitw_v2_1a.tar.gz
-# 	#     mv 0008_sitw_v2_1a/exp/xvector_nnet_1a exp
-# 	#     rm -rf 0008_sitw_v2_1a.tar.gz 0008_sitw_v2_1a
-#     # fi
-#     # Extract x-vector
-#     # for task in ${train_set} ${train_dev} ${recog_set}; do
-# 	#     sid/nnet3/xvector/extract_xvectors.sh --cmd "$train_cmd" --nj ${nj} \
-# 	# 				                          $nnet_dir data/${task}_mfcc \
-# 	# 				                          $nnet_dir/xvectors_${task} &
-#     # done
-#     # wait
-#     # Update json
-#     for task in ${train_set} ${train_dev} ${recog_set}; do
-# 	    local/update_json.sh ${dumpdir}/${task}/delta${do_delta}/data.json ${nnet_dir}/xvectors_${task}/xvector.scp
-#     done
+    mfccdir=mfcc
+    vaddir=mfcc
+    nnet_dir=exp/xvector_nnet_1a
+    for task in ${train_set} ${train_dev} ${recog_set}; do
+        (
+	        utils/copy_data_dir.sh data/${task}_asr data/${task}_mfcc
+	        steps/make_mfcc.sh \
+	            --write-utt2num-frames true \
+	            --mfcc-config conf/mfcc.conf \
+	            --nj ${nj} --cmd "$train_cmd" \
+	            data/${task}_mfcc exp/make_mfcc $mfccdir
+	        utils/fix_data_dir.sh data/${task}_mfcc
+	        sid/compute_vad_decision.sh --nj ${nj} --cmd "$train_cmd" \
+				                        data/${task}_mfcc exp/make_vad ${vaddir}
+	        utils/fix_data_dir.sh data/${task}_mfcc
+        )
+    done
+    wait
+    # Check pretrained model existence
+    # nnet_dir=$PWD/../tts1/
+    if [ ! -e $nnet_dir ];then
+	    echo "X-vector model does not exist. Download pre-trained model."
+	    wget http://kaldi-asr.org/models/8/0008_sitw_v2_1a.tar.gz
+	    tar xvf 0008_sitw_v2_1a.tar.gz
+	    mv 0008_sitw_v2_1a/exp/xvector_nnet_1a exp
+	    rm -rf 0008_sitw_v2_1a.tar.gz 0008_sitw_v2_1a
+    fi
+    Extract x-vector
+    for task in ${train_set} ${train_dev} ${recog_set}; do
+	    sid/nnet3/xvector/extract_xvectors.sh --cmd "$train_cmd" --nj ${nj} \
+					                          $nnet_dir data/${task}_mfcc \
+					                          $nnet_dir/xvectors_${task} &
+    done
+    wait
+    Update json
+    for task in ${train_dev} ${train_set} ${recog_set}; do
+	    local/update_json.sh ${dumpdir}/${task}_tts/delta${do_delta}/data.json ${nnet_dir}/xvectors_${task}/xvector.scp
+    done
     # Finally remove long utterances
     # Also prepare only parallel data
-    for mode in asr tts; do
-    for task in ${train_set} ${train_dev}; do
-	    feat_dir=${dumpdir}/${task}_${mode}/delta${do_delta}
+    for task in ${train_dev}; do # ${train_dev}
+	    feat_dir=${dumpdir}/${task}_tts/delta${do_delta}
 	    python2 local/remove_longshort_utt.py \
 	           --max-input 1500 --max-output 300 \
 	           ${feat_dir}/data.json > ${feat_dir}/data_short.json
 	    # python2 local/prune_json.py ${feat_dir}/data_short.json > ${feat_dir}/data_short_p.json
-    done
     done
 fi
 
@@ -342,7 +345,7 @@ mkdir -p ${lmexpdir}
 # fi
 
 if [ -z ${tag} ]; then
-    expdir=exp/${exp_prefix}${train_set}_asr_${data_type}_${etype}_e${elayers}_subsample${subsample}_unit${eunits}_proj${eprojs}_d${dlayers}_unit${dunits}_${atype}_adim_${adim}_aconvc${aconv_chans}_aconvf${aconv_filts}_mtlalpha${mtlalpha}_${opt}_bs${batchsize}_mli${maxlen_in}_mlo${maxlen_out}_weight_asr${asr_weight}_tts${tts_weight}_s2s${s2s_weight}_t2t${t2t_weight}_mmd${mmd_weight}
+    expdir=exp/${exp_prefix}${train_set}_tts_${data_type}_${etype}_e${elayers}_subsample${subsample}_unit${eunits}_proj${eprojs}_d${dlayers}_unit${dunits}_${atype}_adim_${adim}_aconvc${aconv_chans}_aconvf${aconv_filts}_mtlalpha${mtlalpha}_${opt}_bs${batchsize}_mli${maxlen_in}_mlo${maxlen_out}_weight_asr${asr_weight}_tts${tts_weight}_s2s${s2s_weight}_t2t${t2t_weight}_mmd${mmd_weight}
     if ${do_delta}; then
         expdir=${expdir}_delta
     fi
@@ -382,79 +385,106 @@ else
     expdir=exp/${train_set}_${data_type}_${tag}
 fi
 mkdir -p ${expdir}
-
-if [ ${stage} -le 5 ]; then
-    echo "stage 4: ASR Network Training"
+if [ ${stage} -le 4 ];then
+    echo "stage 4: Text-to-speech model training"
+    # tr_json=${feat_tr_dir}/data.json
+    # dt_json=${feat_dt_dir}/data.json
     ${cuda_cmd} --gpu ${ngpu} ${expdir}/train.log \
-        asr_train.py \
-        --ngpu ${ngpu} \
-        --backend ${backend} \
-        --outdir ${expdir}/results \
-        --debugmode ${debugmode} \
-        --dict ${dict} \
-        --debugdir ${expdir} \
-        --minibatches ${N} \
-        --verbose ${verbose} \
-        --resume ${resume} \
-        --train-json ${dumpdir}/${train_set}_asr/delta${do_delta}/${data_type}.json \
-        --valid-json ${dumpdir}/${train_dev}_asr/delta${do_delta}/${data_type}.json \
-        --etype ${etype} \
-        --elayers ${elayers} \
-        --eunits ${eunits} \
-        --eprojs ${eprojs} \
-        --subsample ${subsample} \
-        --dlayers ${dlayers} \
-        --dunits ${dunits} \
-        --atype ${atype} \
-	--adim ${adim} \
-        --aconv-chans ${aconv_chans} \
-        --aconv-filts ${aconv_filts} \
-        --mtlalpha ${mtlalpha} \
-        --batch-size ${batchsize} \
-        --maxlen-in ${maxlen_in} \
-        --maxlen-out ${maxlen_out} \
-        --opt adadelta \
-        --epochs ${epochs}
+        tts_train.py \
+           --backend ${backend} \
+           --ngpu ${ngpu} \
+           --outdir ${expdir}/results \
+           --verbose ${verbose} \
+           --seed ${seed} \
+           --resume ${resume} \
+           --train-json ${dumpdir}/${train_set}_tts/delta${do_delta}/${data_type}.json \
+           --valid-json ${dumpdir}/${train_dev}_tts/delta${do_delta}/${data_type}.json \
+           --embed_dim ${tts_embed_dim} \
+           --elayers ${tts_elayers} \
+           --eunits ${tts_eunits} \
+           --econv_layers ${tts_econv_layers} \
+           --econv_chans ${tts_econv_chans} \
+           --econv_filts ${tts_econv_filts} \
+           --dlayers ${tts_dlayers} \
+           --dunits ${tts_dunits} \
+           --prenet_layers ${tts_prenet_layers} \
+           --prenet_units ${tts_prenet_units} \
+           --postnet_layers ${tts_postnet_layers} \
+           --postnet_chans ${tts_postnet_chans} \
+           --postnet_filts ${tts_postnet_filts} \
+           --adim ${tts_adim} \
+           --aconv-chans ${tts_aconv_chans} \
+           --aconv-filts ${tts_aconv_filts} \
+           --cumulate_att_w ${tts_cumulate_att_w} \
+           --use_speaker_embedding ${tts_use_speaker_embedding} \
+           --use_batch_norm ${tts_use_batch_norm} \
+           --use_concate ${tts_use_concate} \
+           --use_residual ${tts_use_residual} \
+           --use_masking ${tts_use_masking} \
+           --bce_pos_weight ${tts_bce_pos_weight} \
+           --lr ${lr} \
+           --eps ${eps} \
+           --dropout ${tts_dropout} \
+           --zoneout ${tts_zoneout} \
+           --weight-decay ${weight_decay} \
+           --batch_sort_key ${batch_sort_key} \
+           --batch-size ${batchsize} \
+           --maxlen-in ${maxlen_in} \
+           --maxlen-out ${maxlen_out} \
+           --epochs ${epochs}
 fi
 
+if [ ! -z ${model_exp_dir} ]; then
+    expdir=$model_exp_dir
+fi
 
-if [ ${stage} -le 6 ]; then
-    echo "stage 6: Decoding"
-
-    for rtask in ${recog_set}; do
-    (
-	rtask=${rtask}_asr
-        decode_dir=decode_${rtask}_beam${beam_size}_e${recog_model}_p${penalty}_len${minlenratio}-${maxlenratio}_ctcw${ctc_weight}_rnnlm${lm_weight}
-        feat_recog_dir=${dumpdir}/${rtask}/delta${do_delta}
-
+outdir=${expdir}/outputs_${model}_th${threshold}_mlr${minlenratio}-${maxlenratio}
+if [ ${stage} -le 5 ];then
+    echo "stage 5: Decoding"
+    for sets in ${train_dev}; do # ${eval_set};do
+        [ ! -e  ${outdir}/${sets} ] && mkdir -p ${outdir}/${sets}
+        cp ${dumpdir}/${sets}_tts/delta${do_delta}/data.json ${outdir}/${sets}
         # split data
-        if [ ! -e ${feat_recog_dir}/split${nj}utt/data.1.json ]; then
-            splitjson.py --parts ${nj} ${feat_recog_dir}/data.json
+        if [ ! -e ${outdir}/${sets}/split${nj}utt/data.1.json ]; then
+            splitjson.py --parts ${nj} ${outdir}/${sets}/data.json
         fi
 
-        #### use CPU for decoding
-        ngpu=0
-
-        ${decode_cmd} JOB=1:${nj} ${expdir}/${decode_dir}/log/decode.JOB.log \
-            asr_recog.py \
-            --ngpu ${ngpu} \
-            --backend ${backend} \
-            --recog-json ${feat_recog_dir}/split${nj}utt/data.JOB.json \
-            --result-label ${expdir}/${decode_dir}/data.JOB.json \
-            --model ${expdir}/results/model.${recog_model}  \
-            --model-conf ${expdir}/results/model.json  \
-            --beam-size ${beam_size} \
-            --penalty ${penalty} \
-            --maxlenratio ${maxlenratio} \
-            --minlenratio ${minlenratio} \
-            --ctc-weight ${ctc_weight} \
-            --rnnlm ${lmexpdir}/rnnlm.model.best \
-            --lm-weight ${lm_weight}
-
-        score_sclite.sh --wer true ${expdir}/${decode_dir} ${dict}
-
-    )
+        # decode in parallel
+        ${train_cmd} JOB=1:$nj ${outdir}/${sets}/log/decode.JOB.log \
+            tts_decode.py \
+                --backend ${backend} \
+                --ngpu 0 \
+                --verbose ${verbose} \
+                --out ${outdir}/${sets}/feats.JOB \
+                --json ${outdir}/${sets}/split${nj}utt/data.JOB.json \
+                --model ${expdir}/results/model.loss.best \
+                --threshold ${threshold} \
+                --maxlenratio ${maxlenratio} \
+                --minlenratio ${minlenratio}
+        # concatenate scp files
+        for n in $(seq $nj); do
+            cat "${outdir}/${sets}/feats.$n.scp" || exit 1;
+        done > ${outdir}/${sets}/feats.scp
     done
-    wait
-    echo "Finished"
+fi
+
+if [ ${stage} -le 6 ];then
+    echo "stage 6: Synthesis"
+    for sets in ${train_dev}; do # ${eval_set};do
+        [ ! -e ${outdir}_denorm/${sets} ] && mkdir -p ${outdir}_denorm/${sets}
+        apply-cmvn --norm-vars=true --reverse=true data/${train_set}_tts/cmvn.ark \
+            scp:${outdir}/${sets}/feats.scp \
+            ark,scp:${outdir}_denorm/${sets}/feats.ark,${outdir}_denorm/${sets}/feats.scp
+        convert_fbank.sh --nj ${nj} --cmd "${train_cmd}" \
+            --fs ${fs} \
+            --fmax "${fmax}" \
+            --fmin "${fmin}" \
+            --n_fft ${n_fft} \
+            --n_shift ${n_shift} \
+            --win_length "${win_length}" \
+            --n_mels ${n_mels} \
+            ${outdir}_denorm/${sets} \
+            ${outdir}_denorm/${sets}/log \
+            ${outdir}_denorm/${sets}/wav
+    done
 fi

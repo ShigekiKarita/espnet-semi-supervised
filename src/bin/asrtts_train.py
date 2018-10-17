@@ -187,7 +187,16 @@ def main():
                         help='T2T loss weight (lr) in multi task loss')
     parser.add_argument('--mmd_weight', default=1.0, type=float,
                         help='Maximum mean discrepancy loss weight between encoded speech and text')
+    parser.add_argument('--use_inout_mmd', default=False, type=strtobool,
+                        help="use input/output feature mmd instead of encoder mmd")
+    parser.add_argument('--inter_domain_loss', default='mmd', type=str,
+                        choices=['mmd', 'kl'],
+                        help='inter domain loss type')
+    parser.add_argument('--use_mmd_autoencoding', default=False, type=strtobool,
+                        help="use mmd loss between autoencoding")
     # minibatch related
+    parser.add_argument('--uniform_mtl_sample', default=True, type=strtobool,
+                        help="uniformly sample accross multi-task minibatches")
     parser.add_argument('--batch_sort_key', default=None, type=str,
                         choices=[None, 'output', 'input'], nargs='?',
                         help='Batch sorting key')
@@ -291,7 +300,10 @@ def main():
     # train
     logging.info('backend = ' + args.backend)
     if args.backend == "pytorch":
-        from asrtts_pytorch import train
+        if args.uniform_mtl_sample:
+            from asrtts_pytorch_5050 import train
+        else:
+            from asrtts_pytorch import train
         train(args)
     else:
         raise NotImplementedError

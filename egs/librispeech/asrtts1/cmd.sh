@@ -14,7 +14,7 @@ export train_cmd=slurm.pl
 #"run.pl --mem 2G"
 export cuda_cmd=slurm.pl
 # ="run.pl --mem 2G --gpu 1"
-export decode_cmd==slurm.pl
+export decode_cmd=slurm.pl
 # "run.pl --mem 4G"
 
 # JHU setup
