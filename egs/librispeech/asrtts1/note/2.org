@@ -70,7 +70,6 @@ TODOs add t2t/s2s dev loss
 - with/without MMD does not affect in retraining setting -> maybe we need shared layers in encoder/decoder as in INTERSPEECH2018.
 - ASR improvement of autoencoding and TTS is not clear -> maybe we need to sample pair/unpair data equally 50/50.
 - TTS loss' large degradation in retraining -> retraining TTS need smaller lr unlike flat-start training?
-- 
 
 * TODOs
 

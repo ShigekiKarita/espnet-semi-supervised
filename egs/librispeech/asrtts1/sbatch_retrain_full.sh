@@ -6,9 +6,9 @@ asr="/data/work70/skarita/exp/espnet-asrtts/egs/librispeech/asrtts1/exp/train_cl
 ngpu=1
 for tts_weight in 0.01 ; do
     for lr in 1e-5; do
-        bs=24
+        bs=20
         for idl in mmd kl; do
-            exp_prefix="1018_run6_0.01_ae_retrain_bs24_lr${lr}_asr${asr_weight}_${etype}/sbatch"
+            exp_prefix="1019_run6_0.01_ae_retrain_bs${bs}_lr${lr}_asr${asr_weight}_${etype}/sbatch"
             for mmd in 0.01 ; do
                 opt=" --model_asr ${asr} --model_tts ${tts} --inter_domain_loss ${idl} --use_mmd_ae True "
                 # full

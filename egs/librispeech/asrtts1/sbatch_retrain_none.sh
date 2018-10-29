@@ -7,9 +7,9 @@ ngpu=1
 for tts_weight in 0.01 ; do
     for lr in 1e-5; do
         bs=24
-        for idl in mmd kl; do
-            exp_prefix="1018_run6_0.01_ae_retrain_bs24_lr${lr}_asr${asr_weight}_${etype}/sbatch"
-            for mmd in 0.01 ; do
+        for idl in mmd ; do
+            exp_prefix="1018_run6_none_ae_retrain_bs24_lr${lr}_asr${asr_weight}_${etype}/sbatch"
+            for mmd in 0.0 ; do
                 opt=" --model_asr ${asr} --model_tts ${tts} --inter_domain_loss ${idl} --use_mmd_ae True "
                 # full
                 ./run6.sh --stage 5 --ngpu ${ngpu} --etype ${etype} --lr ${lr} --batchsize ${bs} --mmd_weight ${mmd} --exp_prefix ${exp_prefix} --asr_weight ${asr_weight} --tts_weight ${tts_weight} --s2s_weight ${ae_weight} --t2t_weight ${ae_weight} ${opt} &
