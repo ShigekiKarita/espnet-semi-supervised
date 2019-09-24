@@ -17,8 +17,8 @@ Full PDF is available in [[https://www.isca-speech.org/archive/Interspeech_2018/
 ** how to setup
 
 #+begin_src bash
-$ git clone https://github.com/nttcslab-sp/espnet-semisupervised --recursive
-$ cd espnet-semisupervised/espnet/tools; make PYTHON_VERSION=3 -f conda.mk
+$ git clone https://github.com/nttcslab-sp/espnet-semi-supervised --recursive
+$ cd espnet-semi-supervised/espnet/tools; make PYTHON_VERSION=3 -f conda.mk
 $ cd ../..
 $ ./run.sh --gpu 0 --wsj0 <your-wsj0-path> --wsj1 <your-wsj1-path>
 #+end_src
